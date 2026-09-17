@@ -11,6 +11,7 @@ SETTINGS = Settings(
     app_timezone="America/Chicago",
     kalshi_environment="production",
     kalshi_base_url="https://api.elections.kalshi.com/trade-api/v2",
+    league_ids="NFL,MLB",
 )
 
 WINDOW_START = datetime(2026, 9, 16, 5, 0, tzinfo=timezone.utc)
@@ -74,12 +75,14 @@ def test_includes_upcoming_same_day_events_across_leagues():
             },
         )
 
-    events = _fetch(handler)
+    results = _fetch(handler)
+    events = [event for event, _ in results]
 
     assert [e.event_id for e in events] == ["evt-nfl", "evt-mlb"]
     assert [e.league for e in events] == ["NFL", "MLB"]
     assert events[0].home_team == "Home Team"
     assert events[0].away_team == "Away Team"
+    assert [raw["eventID"] for _, raw in results] == ["evt-nfl", "evt-mlb"]
 
 
 def test_excludes_event_already_started():
@@ -153,7 +156,7 @@ def test_follows_pagination_cursor_across_leagues():
         page = pages[1] if cursor == "page-2" else pages[0]
         return httpx.Response(200, json=page)
 
-    events = _fetch(handler)
+    events = [event for event, _ in _fetch(handler)]
 
     assert [e.event_id for e in events] == ["evt-1", "evt-2"]
     assert [e.league for e in events] == ["NFL", "MLB"]
@@ -172,7 +175,7 @@ def test_skips_event_with_missing_fields():
             },
         )
 
-    events = _fetch(handler)
+    events = [event for event, _ in _fetch(handler)]
 
     assert [e.event_id for e in events] == ["evt-ok"]
 
@@ -182,6 +185,48 @@ def test_raises_on_api_error_response():
         return httpx.Response(
             400, json={"success": False, "error": "leagueID required"}
         )
+
+    with _client(handler) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            list(
+                get_todays_upcoming_events(
+                    SETTINGS,
+                    WINDOW_START,
+                    WINDOW_END,
+                    client,
+                    league_ids=LEAGUE_IDS,
+                    now=NOW,
+                )
+            )
+
+
+def test_retries_after_rate_limit_then_succeeds(monkeypatch):
+    monkeypatch.setattr("src.sports_odds.time.sleep", lambda seconds: None)
+    calls = {"count": 0}
+
+    def handler(request):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": [_event("evt-1", "2026-09-16T18:00:00.000Z", league="NFL")],
+            },
+        )
+
+    events = [event for event, _ in _fetch(handler)]
+
+    assert calls["count"] == 2
+    assert [e.event_id for e in events] == ["evt-1"]
+
+
+def test_raises_after_exhausting_rate_limit_retries(monkeypatch):
+    monkeypatch.setattr("src.sports_odds.time.sleep", lambda seconds: None)
+
+    def handler(request):
+        return httpx.Response(429)
 
     with _client(handler) as client:
         with pytest.raises(httpx.HTTPStatusError):

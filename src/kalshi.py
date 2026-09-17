@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from decimal import Decimal, InvalidOperation
 
@@ -17,27 +18,54 @@ logger = logging.getLogger(__name__)
 # requesting ?status=open returns markets whose own `status` field is "active".
 OPEN_STATUS = "active"
 
+# Small bounded retry on 429s; see CLAUDE.md's API Rate Limits guidance
+# (backoff, not a retry framework, and never a parallel retry storm).
+MAX_RATE_LIMIT_RETRIES = 5
 
-def get_open_markets(settings: Settings, client: httpx.Client) -> Iterator[PredictionMarket]:
-    """Yield currently open Kalshi markets."""
+# Kalshi's own game-winner market for a league lives in a predictable series,
+# e.g. NFL -> KXNFLGAME (confirmed live via GET /series?category=Sports).
+# Kalshi's full open-market catalog spans every category (elections, crypto,
+# weather, ...) and runs into the hundreds of thousands of markets, so
+# scoping the request to each league's game series avoids paginating all of
+# it and filtering client-side.
+SERIES_TICKER_TEMPLATE = "KX{league_id}GAME"
+
+
+def get_open_markets(
+    settings: Settings, client: httpx.Client, league_ids: str
+) -> Iterator[PredictionMarket]:
+    """Yield currently open Kalshi game markets for the given league IDs."""
     fetched = 0
     eligible = 0
 
-    for raw_market in _fetch_markets(settings, client):
-        fetched += 1
+    for league_id in _split_league_ids(league_ids):
+        series_ticker = SERIES_TICKER_TEMPLATE.format(league_id=league_id)
 
-        market = _parse_market(raw_market)
-        if market is None:
-            continue
+        for raw_market in _fetch_markets(settings, client, series_ticker):
+            fetched += 1
 
-        eligible += 1
-        yield market
+            market = _parse_market(raw_market)
+            if market is None:
+                continue
+
+            eligible += 1
+            yield market
 
     logger.info("Fetched %d Kalshi markets, %d open", fetched, eligible)
 
 
-def _fetch_markets(settings: Settings, client: httpx.Client) -> Iterator[dict]:
-    params: dict[str, str] = {"status": "open", "limit": "1000"}
+def _split_league_ids(league_ids: str) -> list[str]:
+    return [league_id.strip() for league_id in league_ids.split(",") if league_id.strip()]
+
+
+def _fetch_markets(
+    settings: Settings, client: httpx.Client, series_ticker: str
+) -> Iterator[dict]:
+    params: dict[str, str] = {
+        "status": "open",
+        "limit": "1000",
+        "series_ticker": series_ticker,
+    }
 
     cursor: str | None = None
     while True:
@@ -45,15 +73,38 @@ def _fetch_markets(settings: Settings, client: httpx.Client) -> Iterator[dict]:
         if cursor:
             request_params["cursor"] = cursor
 
-        response = client.get(f"{settings.kalshi_base_url}/markets", params=request_params)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _get_with_retry(client, f"{settings.kalshi_base_url}/markets", request_params)
 
         yield from payload.get("markets", [])
 
         cursor = payload.get("cursor")
         if not cursor:
             break
+
+
+def _get_with_retry(client: httpx.Client, url: str, params: dict[str, str]) -> dict:
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        response = client.get(url, params=params)
+
+        if response.status_code != 429 or attempt == MAX_RATE_LIMIT_RETRIES:
+            response.raise_for_status()
+            return response.json()
+
+        wait_seconds = _retry_after_seconds(response) or (2**attempt)
+        logger.warning("Kalshi rate limit hit, retrying in %.1fs", wait_seconds)
+        time.sleep(wait_seconds)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except ValueError:
+        return None
 
 
 def _parse_market(raw_market: dict) -> PredictionMarket | None:

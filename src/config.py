@@ -23,6 +23,7 @@ class Settings:
     app_timezone: str
     kalshi_environment: str
     kalshi_base_url: str
+    league_ids: str
 
 
 def load_settings() -> Settings:
@@ -47,4 +48,7 @@ def load_settings() -> Settings:
         app_timezone=os.getenv("APP_TIMEZONE", "America/Chicago"),
         kalshi_environment=kalshi_environment,
         kalshi_base_url=kalshi_base_url,
+        # This subscription tier requires an explicit leagueID or eventID on
+        # every /events request; there is no "all leagues" option available.
+        league_ids=os.getenv("LEAGUE_IDS", "NFL,MLB"),
     )

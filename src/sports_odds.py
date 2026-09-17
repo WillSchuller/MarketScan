@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.sportsgameodds.com/v2"
 
+# Small bounded retry on 429s so a rate-limit blip doesn't fail the whole
+# scan; see CLAUDE.md's API Rate Limits guidance (backoff, not a retry
+# framework, and never a parallel retry storm).
+MAX_RATE_LIMIT_RETRIES = 5
+
 
 def get_todays_upcoming_events(
     settings: Settings,
@@ -23,8 +29,13 @@ def get_todays_upcoming_events(
     client: httpx.Client,
     league_ids: str | None = None,
     now: datetime | None = None,
-) -> Iterator[Event]:
-    """Yield today's not-yet-started events that currently have odds available."""
+) -> Iterator[tuple[Event, dict]]:
+    """Yield (event, raw_event) for today's not-yet-started events with odds available.
+
+    The raw event is included alongside the normalized Event so callers can
+    derive sportsbook quotes (see parse_sportsbook_quotes) without a second
+    SportsGameOdds request.
+    """
     current_time = now or datetime.now(timezone.utc)
     fetched = 0
     eligible = 0
@@ -45,7 +56,7 @@ def get_todays_upcoming_events(
             continue
 
         eligible += 1
-        yield event
+        yield event, raw_event
 
     logger.info("Fetched %d events, %d eligible for today", fetched, eligible)
 
@@ -73,13 +84,12 @@ def _fetch_events(
         if cursor:
             request_params["cursor"] = cursor
 
-        response = client.get(
+        payload = _get_with_retry(
+            settings,
+            client,
             f"{BASE_URL}/events",
-            headers={"x-api-key": settings.sports_game_odds_api_key},
-            params=request_params,
+            request_params,
         )
-        response.raise_for_status()
-        payload = response.json()
 
         if not payload.get("success", True):
             raise RuntimeError(f"SportsGameOdds request failed: {payload.get('error')}")
@@ -89,6 +99,37 @@ def _fetch_events(
         cursor = payload.get("nextCursor")
         if not cursor:
             break
+
+
+def _get_with_retry(
+    settings: Settings, client: httpx.Client, url: str, params: dict[str, str]
+) -> dict:
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        response = client.get(
+            url,
+            headers={"x-api-key": settings.sports_game_odds_api_key},
+            params=params,
+        )
+
+        if response.status_code != 429 or attempt == MAX_RATE_LIMIT_RETRIES:
+            response.raise_for_status()
+            return response.json()
+
+        wait_seconds = _retry_after_seconds(response) or (2**attempt)
+        logger.warning("SportsGameOdds rate limit hit, retrying in %.1fs", wait_seconds)
+        time.sleep(wait_seconds)
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except ValueError:
+        return None
 
 
 def parse_sportsbook_quotes(raw_event: dict) -> Iterator[SportsbookQuote]:
