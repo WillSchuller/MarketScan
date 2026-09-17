@@ -35,12 +35,8 @@ def find_potential_matches(event: Event, markets: list[PredictionMarket]) -> lis
     another names the away team, before treating any of them as a match.
     A false positive is worse than a missed match.
 
-    Known limitation: this does not disambiguate by date, so a team playing
-    a multi-game series this week can surface matches for other games in
-    that series, not just today's. Kalshi's `close_time` on these markets
-    was verified live to not reliably correspond to the game's actual start
-    time (see CLAUDE.md's "Do Not Use Kalshi close_time as Game Start Time"),
-    so it isn't used to narrow this further.
+    `markets` is expected to already be scoped to today's games (see
+    get_open_markets), so this does not need its own date disambiguation.
     """
     home = normalize_name(event.home_team)
     away = normalize_name(event.away_team)
@@ -73,7 +69,15 @@ def main() -> None:
                 settings, start_utc, end_utc, client, league_ids=settings.league_ids
             )
         )
-        markets = list(get_open_markets(settings, client, league_ids=settings.league_ids))
+        markets = list(
+            get_open_markets(
+                settings,
+                client,
+                league_ids=settings.league_ids,
+                start_utc=start_utc,
+                end_utc=end_utc,
+            )
+        )
 
     print(f"Upcoming games today: {len(todays_events)}\n")
 

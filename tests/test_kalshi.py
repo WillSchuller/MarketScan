@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -14,13 +15,17 @@ SETTINGS = Settings(
     league_ids="NFL",
 )
 
+WINDOW_START = datetime(2026, 9, 17, 5, 0, tzinfo=timezone.utc)
+WINDOW_END = datetime(2026, 9, 18, 5, 0, tzinfo=timezone.utc)
 
-def _market(ticker, status="active", **overrides):
+
+def _market(ticker, status="active", occurrence_datetime="2026-09-17T23:15:00Z", **overrides):
     market = {
         "ticker": ticker,
         "event_ticker": f"{ticker}-EVT",
         "title": "Some Team wins",
         "status": status,
+        "occurrence_datetime": occurrence_datetime,
         "yes_bid_dollars": "0.4500",
         "yes_ask_dollars": "0.4700",
         "no_bid_dollars": "0.5300",
@@ -36,7 +41,15 @@ def _client(handler):
 
 def _fetch(handler, settings=SETTINGS):
     with _client(handler) as client:
-        return list(get_open_markets(settings, client, league_ids=settings.league_ids))
+        return list(
+            get_open_markets(
+                settings,
+                client,
+                league_ids=settings.league_ids,
+                start_utc=WINDOW_START,
+                end_utc=WINDOW_END,
+            )
+        )
 
 
 def test_requests_open_status_for_leagues_game_series():
@@ -110,6 +123,34 @@ def test_excludes_market_not_actually_open():
     assert [m.ticker for m in markets] == ["KXTEST-open"]
 
 
+def test_excludes_market_for_a_different_days_game():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "markets": [
+                    _market("KXTEST-today", occurrence_datetime="2026-09-17T23:15:00Z"),
+                    _market("KXTEST-tomorrow", occurrence_datetime="2026-09-18T18:00:00Z"),
+                    _market("KXTEST-yesterday", occurrence_datetime="2026-09-16T18:00:00Z"),
+                ]
+            },
+        )
+
+    markets = _fetch(handler)
+
+    assert [m.ticker for m in markets] == ["KXTEST-today"]
+
+
+def test_excludes_market_with_missing_occurrence_datetime():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"markets": [_market("KXTEST-1", occurrence_datetime=None)]},
+        )
+
+    assert _fetch(handler) == []
+
+
 def test_follows_cursor_pagination():
     pages = [
         {"markets": [_market("KXTEST-1")], "cursor": "page-2"},
@@ -149,7 +190,15 @@ def test_raises_on_http_error():
 
     with _client(handler) as client:
         with pytest.raises(httpx.HTTPStatusError):
-            list(get_open_markets(SETTINGS, client, league_ids=SETTINGS.league_ids))
+            list(
+                get_open_markets(
+                    SETTINGS,
+                    client,
+                    league_ids=SETTINGS.league_ids,
+                    start_utc=WINDOW_START,
+                    end_utc=WINDOW_END,
+                )
+            )
 
 
 def test_retries_after_rate_limit_then_succeeds(monkeypatch):
@@ -176,4 +225,12 @@ def test_raises_after_exhausting_rate_limit_retries(monkeypatch):
 
     with _client(handler) as client:
         with pytest.raises(httpx.HTTPStatusError):
-            list(get_open_markets(SETTINGS, client, league_ids=SETTINGS.league_ids))
+            list(
+                get_open_markets(
+                    SETTINGS,
+                    client,
+                    league_ids=SETTINGS.league_ids,
+                    start_utc=WINDOW_START,
+                    end_utc=WINDOW_END,
+                )
+            )

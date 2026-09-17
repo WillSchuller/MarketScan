@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -32,9 +33,22 @@ SERIES_TICKER_TEMPLATE = "KX{league_id}GAME"
 
 
 def get_open_markets(
-    settings: Settings, client: httpx.Client, league_ids: str
+    settings: Settings,
+    client: httpx.Client,
+    league_ids: str,
+    start_utc: datetime,
+    end_utc: datetime,
 ) -> Iterator[PredictionMarket]:
-    """Yield currently open Kalshi game markets for the given league IDs."""
+    """Yield open Kalshi game markets for the given leagues' games today.
+
+    Kalshi's `close_time` was verified live to not reliably correspond to a
+    game's actual date (it can be offset by days), so this instead uses
+    `occurrence_datetime` — Kalshi's expected-conclusion timestamp, which was
+    verified live to track close to each game's real date/time — to scope
+    results to [start_utc, end_utc), mirroring SportsGameOdds' same-day
+    window. Without this, a team playing a multi-game series this week would
+    surface matches for every game in the series, not just today's.
+    """
     fetched = 0
     eligible = 0
 
@@ -44,6 +58,10 @@ def get_open_markets(
         for raw_market in _fetch_markets(settings, client, series_ticker):
             fetched += 1
 
+            occurrence = _parse_occurrence_datetime(raw_market)
+            if occurrence is None or not (start_utc <= occurrence < end_utc):
+                continue
+
             market = _parse_market(raw_market)
             if market is None:
                 continue
@@ -51,7 +69,7 @@ def get_open_markets(
             eligible += 1
             yield market
 
-    logger.info("Fetched %d Kalshi markets, %d open", fetched, eligible)
+    logger.info("Fetched %d Kalshi markets, %d open today", fetched, eligible)
 
 
 def _split_league_ids(league_ids: str) -> list[str]:
@@ -107,10 +125,24 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
         return None
 
 
+def _parse_occurrence_datetime(raw_market: dict) -> datetime | None:
+    raw_value = raw_market.get("occurrence_datetime")
+    if raw_value is None:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_market(raw_market: dict) -> PredictionMarket | None:
     try:
         # The status filter is applied server-side, but provider state can lag,
         # so re-check locally rather than trusting the request parameter alone.
+        # Note: per CLAUDE.md, Kalshi's own status must never independently
+        # establish game-start eligibility — that's SportsGameOdds' job, and
+        # this function is only ever called for markets already scoped to an
+        # already-eligible SportsGameOdds event's day.
         if raw_market["status"] != OPEN_STATUS:
             return None
 
