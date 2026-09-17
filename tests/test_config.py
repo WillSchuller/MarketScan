@@ -13,6 +13,7 @@ def test_load_settings_reads_required_values(monkeypatch):
     assert settings.sports_game_odds_api_key == "fake-key"
     assert settings.app_timezone == "America/New_York"
     assert settings.kalshi_environment == "demo"
+    assert settings.kalshi_base_url == "https://demo-api.kalshi.co/trade-api/v2"
 
 
 def test_load_settings_uses_defaults(monkeypatch):
@@ -24,10 +25,19 @@ def test_load_settings_uses_defaults(monkeypatch):
 
     assert settings.app_timezone == "America/Chicago"
     assert settings.kalshi_environment == "production"
+    assert settings.kalshi_base_url == "https://api.elections.kalshi.com/trade-api/v2"
 
 
 def test_load_settings_missing_api_key_raises(monkeypatch):
     monkeypatch.delenv("SPORTS_GAME_ODDS_API_KEY", raising=False)
 
     with pytest.raises(RuntimeError, match="SPORTS_GAME_ODDS_API_KEY is required"):
+        load_settings()
+
+
+def test_load_settings_invalid_kalshi_environment_raises(monkeypatch):
+    monkeypatch.setenv("SPORTS_GAME_ODDS_API_KEY", "fake-key")
+    monkeypatch.setenv("KALSHI_ENVIRONMENT", "sandbox")
+
+    with pytest.raises(RuntimeError, match="KALSHI_ENVIRONMENT must be one of"):
         load_settings()

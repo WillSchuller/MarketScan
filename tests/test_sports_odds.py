@@ -10,6 +10,7 @@ SETTINGS = Settings(
     sports_game_odds_api_key="fake-key",
     app_timezone="America/Chicago",
     kalshi_environment="production",
+    kalshi_base_url="https://api.elections.kalshi.com/trade-api/v2",
 )
 
 WINDOW_START = datetime(2026, 9, 16, 5, 0, tzinfo=timezone.utc)
