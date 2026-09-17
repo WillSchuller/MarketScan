@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import httpx
 
 from src.config import Settings
-from src.models import Event
+from src.models import Event, SportsbookQuote
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,76 @@ def _fetch_events(
         cursor = payload.get("nextCursor")
         if not cursor:
             break
+
+
+def parse_sportsbook_quotes(raw_event: dict) -> Iterator[SportsbookQuote]:
+    """Yield normalized, currently-available per-bookmaker quotes for one raw event."""
+    event_id = raw_event.get("eventID")
+    if not event_id:
+        return
+
+    players = raw_event.get("players", {})
+
+    for raw_odd in raw_event.get("odds", {}).values():
+        common_fields = _quote_common_fields(raw_odd, players)
+        if common_fields is None:
+            continue
+
+        for sportsbook, book_data in raw_odd.get("byBookmaker", {}).items():
+            # Stale/inactive lines must not be treated as currently tradeable.
+            if not book_data.get("available"):
+                continue
+
+            american_odds = _parse_int(book_data.get("odds"))
+            if american_odds is None:
+                continue
+
+            yield SportsbookQuote(
+                event_id=event_id,
+                sportsbook=sportsbook,
+                american_odds=american_odds,
+                line=_parse_line(book_data),
+                **common_fields,
+            )
+
+
+def _quote_common_fields(raw_odd: dict, players: dict) -> dict | None:
+    try:
+        stat = raw_odd["statID"]
+        period = raw_odd["periodID"]
+        side = raw_odd["sideID"]
+    except KeyError:
+        return None
+
+    player_id = raw_odd.get("playerID")
+    player_name = players.get(player_id, {}).get("name") if player_id else None
+
+    return {
+        "player_id": player_id,
+        "player_name": player_name,
+        "stat": stat,
+        "period": period,
+        "side": side,
+    }
+
+
+def _parse_int(raw_value: object) -> int | None:
+    if raw_value is None:
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_line(book_data: dict) -> float | None:
+    raw_line = book_data.get("overUnder", book_data.get("spread"))
+    if raw_line is None:
+        return None
+    try:
+        return float(raw_line)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_event(raw_event: dict) -> Event | None:

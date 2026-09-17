@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from src.config import Settings
-from src.sports_odds import get_todays_upcoming_events
+from src.sports_odds import get_todays_upcoming_events, parse_sportsbook_quotes
 
 SETTINGS = Settings(
     sports_game_odds_api_key="fake-key",
@@ -195,3 +195,109 @@ def test_raises_on_api_error_response():
                     now=NOW,
                 )
             )
+
+
+def _raw_event_with_odds(event_id, odds):
+    return {
+        "eventID": event_id,
+        "players": {
+            "SOME_PLAYER_1_NFL": {"playerID": "SOME_PLAYER_1_NFL", "name": "Some Player"},
+        },
+        "odds": odds,
+    }
+
+
+def _ou_odd(odd_id, side, *, book_odds_by_sportsbook):
+    return {
+        "oddID": odd_id,
+        "statID": "passing_yards",
+        "periodID": "game",
+        "sideID": side,
+        "playerID": "SOME_PLAYER_1_NFL",
+        "byBookmaker": {
+            sportsbook: {
+                "odds": odds,
+                "overUnder": "249.5",
+                "available": available,
+            }
+            for sportsbook, (odds, available) in book_odds_by_sportsbook.items()
+        },
+    }
+
+
+def test_parses_over_under_quotes_from_two_sportsbooks_across_two_events():
+    event_1 = _raw_event_with_odds(
+        "evt-1",
+        {
+            "passing_yards-SOME_PLAYER_1_NFL-game-ou-over": _ou_odd(
+                "passing_yards-SOME_PLAYER_1_NFL-game-ou-over",
+                "over",
+                book_odds_by_sportsbook={
+                    "draftkings": ("-115", True),
+                    "fanduel": ("-110", True),
+                },
+            ),
+        },
+    )
+    event_2 = _raw_event_with_odds(
+        "evt-2",
+        {
+            "passing_yards-SOME_PLAYER_1_NFL-game-ou-under": _ou_odd(
+                "passing_yards-SOME_PLAYER_1_NFL-game-ou-under",
+                "under",
+                book_odds_by_sportsbook={
+                    "draftkings": ("-105", True),
+                    "fanduel": ("-120", True),
+                },
+            ),
+        },
+    )
+
+    quotes_1 = list(parse_sportsbook_quotes(event_1))
+    quotes_2 = list(parse_sportsbook_quotes(event_2))
+
+    assert len(quotes_1) == 2
+    assert {q.sportsbook for q in quotes_1} == {"draftkings", "fanduel"}
+    assert all(q.event_id == "evt-1" for q in quotes_1)
+    assert all(q.side == "over" for q in quotes_1)
+    assert all(q.line == 249.5 for q in quotes_1)
+    assert all(q.player_id == "SOME_PLAYER_1_NFL" for q in quotes_1)
+    assert all(q.player_name == "Some Player" for q in quotes_1)
+
+    draftkings_quote = next(q for q in quotes_1 if q.sportsbook == "draftkings")
+    assert draftkings_quote.american_odds == -115
+
+    assert len(quotes_2) == 2
+    assert all(q.event_id == "evt-2" for q in quotes_2)
+    assert all(q.side == "under" for q in quotes_2)
+
+
+def test_discards_unavailable_bookmaker_quotes():
+    event = _raw_event_with_odds(
+        "evt-1",
+        {
+            "passing_yards-SOME_PLAYER_1_NFL-game-ou-over": _ou_odd(
+                "passing_yards-SOME_PLAYER_1_NFL-game-ou-over",
+                "over",
+                book_odds_by_sportsbook={
+                    "draftkings": ("-115", True),
+                    "fanduel": ("-110", False),
+                },
+            ),
+        },
+    )
+
+    quotes = list(parse_sportsbook_quotes(event))
+
+    assert [q.sportsbook for q in quotes] == ["draftkings"]
+
+
+def test_skips_odd_entry_with_missing_required_fields():
+    event = _raw_event_with_odds(
+        "evt-1",
+        {
+            "broken": {"oddID": "broken", "byBookmaker": {"draftkings": {"odds": "-110", "available": True}}},
+        },
+    )
+
+    assert list(parse_sportsbook_quotes(event)) == []

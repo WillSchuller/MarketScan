@@ -25,3 +25,16 @@ class PredictionMarket:
     yes_ask: Decimal | None
     no_bid: Decimal | None
     no_ask: Decimal | None
+
+
+@dataclass(frozen=True)
+class SportsbookQuote:
+    event_id: str
+    player_id: str | None
+    player_name: str | None
+    stat: str
+    period: str
+    side: str
+    line: float | None
+    sportsbook: str
+    american_odds: int
