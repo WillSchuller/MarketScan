@@ -35,6 +35,7 @@ class SportsbookQuote:
     stat: str
     period: str
     side: str
+    bet_type: str
     line: float | None
     sportsbook: str
     american_odds: int

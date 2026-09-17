@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from src.config import load_settings
 from src.kalshi import get_open_markets
-from src.models import Event, PredictionMarket
+from src.models import Event, PredictionMarket, SportsbookQuote
 from src.sports_odds import get_todays_upcoming_events, parse_sportsbook_quotes
 from src.time_utils import get_today_utc_window
 
@@ -56,6 +57,74 @@ def find_potential_matches(event: Event, markets: list[PredictionMarket]) -> lis
     return matches
 
 
+def moneyline_by_sportsbook(
+    sportsbook_quotes: list[SportsbookQuote],
+) -> dict[str, dict[str, int]]:
+    """Group each sportsbook's team (non-player) game moneyline odds by side.
+
+    Both moneylines and spreads use statID "points", so betTypeID is required
+    to isolate moneyline quotes specifically.
+    """
+    by_sportsbook: dict[str, dict[str, int]] = {}
+    for quote in sportsbook_quotes:
+        if (
+            quote.player_id is not None
+            or quote.bet_type != "ml"
+            or quote.stat != "points"
+            or quote.period != "game"
+            or quote.side not in ("home", "away")
+        ):
+            continue
+        by_sportsbook.setdefault(quote.sportsbook, {})[quote.side] = quote.american_odds
+
+    return by_sportsbook
+
+
+def find_team_market(
+    matches: list[PredictionMarket], team_name: str
+) -> PredictionMarket | None:
+    """Pick the match (from an already-verified home/away pair) naming this team."""
+    normalized_team = normalize_name(team_name)
+    for market in matches:
+        phrase = _team_phrase(market.title)
+        if phrase and phrase in normalized_team:
+            return market
+    return None
+
+
+def _format_american_odds(odds: int | None) -> str:
+    return f"{odds:+d}" if odds is not None else "-"
+
+
+def _format_kalshi_price(price: Decimal | None) -> str:
+    return f"${price:.2f}" if price is not None else "-"
+
+
+def _print_moneyline_comparison(
+    event: Event,
+    sportsbook_quotes: list[SportsbookQuote],
+    matches: list[PredictionMarket],
+) -> None:
+    moneyline = moneyline_by_sportsbook(sportsbook_quotes)
+    if not moneyline and not matches:
+        return
+
+    home_market = find_team_market(matches, event.home_team)
+    away_market = find_team_market(matches, event.away_team)
+
+    print(f"{'Moneyline':<18}{event.away_team:>16} {event.home_team:>16}")
+    for sportsbook in sorted(moneyline):
+        sides = moneyline[sportsbook]
+        away_odds = _format_american_odds(sides.get("away"))
+        home_odds = _format_american_odds(sides.get("home"))
+        print(f"{sportsbook:<18}{away_odds:>16} {home_odds:>16}")
+
+    if home_market or away_market:
+        away_price = _format_kalshi_price(away_market.yes_ask if away_market else None)
+        home_price = _format_kalshi_price(home_market.yes_ask if home_market else None)
+        print(f"{'kalshi (yes ask)':<18}{away_price:>16} {home_price:>16}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -91,6 +160,8 @@ def main() -> None:
         print(f"Start: {local_start.strftime('%I:%M %p %Z').lstrip('0')}")
         print(f"Sportsbook markets: {len(sportsbook_quotes)}")
         print(f"Kalshi matches: {len(matches)}")
+        if matches:
+            _print_moneyline_comparison(event, sportsbook_quotes, matches)
         print()
 
 

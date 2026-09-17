@@ -258,6 +258,7 @@ def _ou_odd(odd_id, side, *, book_odds_by_sportsbook):
         "statID": "passing_yards",
         "periodID": "game",
         "sideID": side,
+        "betTypeID": "ou",
         "playerID": "SOME_PLAYER_1_NFL",
         "byBookmaker": {
             sportsbook: {
@@ -335,6 +336,44 @@ def test_discards_unavailable_bookmaker_quotes():
     quotes = list(parse_sportsbook_quotes(event))
 
     assert [q.sportsbook for q in quotes] == ["draftkings"]
+
+
+def _moneyline_odd(odd_id, side, *, book_odds_by_sportsbook):
+    return {
+        "oddID": odd_id,
+        "statID": "points",
+        "periodID": "game",
+        "sideID": side,
+        "betTypeID": "ml",
+        "byBookmaker": {
+            sportsbook: {"odds": odds, "available": available}
+            for sportsbook, (odds, available) in book_odds_by_sportsbook.items()
+        },
+    }
+
+
+def test_parses_team_moneyline_quotes_with_no_player():
+    event = _raw_event_with_odds(
+        "evt-1",
+        {
+            "points-home-game-ml-home": _moneyline_odd(
+                "points-home-game-ml-home",
+                "home",
+                book_odds_by_sportsbook={"draftkings": ("-150", True)},
+            ),
+            "points-away-game-ml-away": _moneyline_odd(
+                "points-away-game-ml-away",
+                "away",
+                book_odds_by_sportsbook={"draftkings": ("+130", True)},
+            ),
+        },
+    )
+
+    quotes = list(parse_sportsbook_quotes(event))
+
+    assert {(q.side, q.american_odds) for q in quotes} == {("home", -150), ("away", 130)}
+    assert all(q.bet_type == "ml" for q in quotes)
+    assert all(q.player_id is None for q in quotes)
 
 
 def test_skips_odd_entry_with_missing_required_fields():

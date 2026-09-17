@@ -168,6 +168,7 @@ def _quote_common_fields(raw_odd: dict, players: dict) -> dict | None:
         stat = raw_odd["statID"]
         period = raw_odd["periodID"]
         side = raw_odd["sideID"]
+        bet_type = raw_odd["betTypeID"]
     except KeyError:
         return None
 
@@ -180,6 +181,7 @@ def _quote_common_fields(raw_odd: dict, players: dict) -> dict | None:
         "stat": stat,
         "period": period,
         "side": side,
+        "bet_type": bet_type,
     }
 
 

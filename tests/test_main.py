@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from src.main import find_potential_matches, normalize_name
-from src.models import Event, PredictionMarket
+from src.main import find_potential_matches, find_team_market, moneyline_by_sportsbook, normalize_name
+from src.models import Event, PredictionMarket, SportsbookQuote
 from datetime import datetime, timezone
 
 
@@ -74,3 +74,71 @@ def test_no_match_for_unrelated_game():
     ]
 
     assert find_potential_matches(event, markets) == []
+
+
+def _moneyline_quote(sportsbook, side, american_odds):
+    return SportsbookQuote(
+        event_id="evt-1",
+        player_id=None,
+        player_name=None,
+        stat="points",
+        period="game",
+        side=side,
+        bet_type="ml",
+        line=None,
+        sportsbook=sportsbook,
+        american_odds=american_odds,
+    )
+
+
+def test_moneyline_by_sportsbook_groups_sides():
+    quotes = [
+        _moneyline_quote("draftkings", "home", -150),
+        _moneyline_quote("draftkings", "away", 130),
+        _moneyline_quote("fanduel", "away", 125),
+    ]
+
+    assert moneyline_by_sportsbook(quotes) == {
+        "draftkings": {"home": -150, "away": 130},
+        "fanduel": {"away": 125},
+    }
+
+
+def test_moneyline_by_sportsbook_ignores_player_props_and_spreads():
+    prop_quote = SportsbookQuote(
+        event_id="evt-1",
+        player_id="SOME_PLAYER",
+        player_name="Some Player",
+        stat="points",
+        period="game",
+        side="home",
+        bet_type="ml",
+        line=None,
+        sportsbook="draftkings",
+        american_odds=-150,
+    )
+    spread_quote = SportsbookQuote(
+        event_id="evt-1",
+        player_id=None,
+        player_name=None,
+        stat="points",
+        period="game",
+        side="home",
+        bet_type="sp",
+        line=-3.5,
+        sportsbook="draftkings",
+        american_odds=-110,
+    )
+
+    assert moneyline_by_sportsbook([prop_quote, spread_quote]) == {}
+
+
+def test_find_team_market_matches_by_name_containment():
+    markets = [
+        _market("KXNFLGAME-26SEP17DETBUF", "Detroit wins"),
+        _market("KXNFLGAME-26SEP17DETBUF", "Buffalo wins"),
+    ]
+
+    assert find_team_market(markets, "Buffalo Bills").title == "Buffalo wins"
+    assert find_team_market(markets, "Detroit Lions").title == "Detroit wins"
+    assert find_team_market(markets, "Dallas Cowboys") is None
