@@ -1,7 +1,15 @@
 from decimal import Decimal
 
-from src.main import find_potential_matches, find_team_market, moneyline_by_sportsbook, normalize_name
-from src.models import Event, PredictionMarket, SportsbookQuote
+from src.main import (
+    find_potential_matches,
+    find_prop_market,
+    find_team_market,
+    kalshi_game_ticker_suffix,
+    moneyline_by_sportsbook,
+    normalize_name,
+    prop_odds_by_sportsbook,
+)
+from src.models import Event, PlayerPropMarket, PredictionMarket, SportsbookQuote
 from datetime import datetime, timezone
 
 
@@ -142,3 +150,94 @@ def test_find_team_market_matches_by_name_containment():
     assert find_team_market(markets, "Buffalo Bills").title == "Buffalo wins"
     assert find_team_market(markets, "Detroit Lions").title == "Detroit wins"
     assert find_team_market(markets, "Dallas Cowboys") is None
+
+
+def test_kalshi_game_ticker_suffix_strips_league_game_prefix():
+    matches = [
+        _market("KXNFLGAME-26SEP17DETBUF", "Detroit wins"),
+        _market("KXNFLGAME-26SEP17DETBUF", "Buffalo wins"),
+    ]
+
+    assert kalshi_game_ticker_suffix("NFL", matches) == "26SEP17DETBUF"
+
+
+def test_kalshi_game_ticker_suffix_none_when_no_match_has_expected_prefix():
+    matches = [_market("KXMLBGAME-26SEP17DETBUF", "Detroit wins")]
+
+    assert kalshi_game_ticker_suffix("NFL", matches) is None
+
+
+def _prop_quote(player_name, stat, side, line, sportsbook, american_odds, period="game"):
+    return SportsbookQuote(
+        event_id="evt-1",
+        player_id=f"{player_name.upper()}_1_NFL",
+        player_name=player_name,
+        stat=stat,
+        period=period,
+        side=side,
+        bet_type="ou",
+        line=line,
+        sportsbook=sportsbook,
+        american_odds=american_odds,
+    )
+
+
+def test_prop_odds_by_sportsbook_groups_over_under_by_player_stat_line():
+    quotes = [
+        _prop_quote("Brock Purdy", "passing_yards", "over", 257.5, "fanduel", -113),
+        _prop_quote("Brock Purdy", "passing_yards", "under", 257.5, "fanduel", -107),
+        _prop_quote("Brock Purdy", "passing_yards", "over", 258.5, "draftkings", -110),
+    ]
+
+    grouped = prop_odds_by_sportsbook(quotes)
+
+    assert grouped == {
+        ("Brock Purdy", "passing_yards", 257.5): {"fanduel": {"over": -113, "under": -107}},
+        ("Brock Purdy", "passing_yards", 258.5): {"draftkings": {"over": -110}},
+    }
+
+
+def test_prop_odds_by_sportsbook_ignores_non_game_period_and_missing_line():
+    quotes = [
+        _prop_quote("Brock Purdy", "passing_yards", "over", 150.5, "fanduel", -110, period="1h"),
+        SportsbookQuote(
+            event_id="evt-1",
+            player_id="BROCK_PURDY_1_NFL",
+            player_name="Brock Purdy",
+            stat="touchdowns",
+            period="game",
+            side="yes",
+            bet_type="yn",
+            line=None,
+            sportsbook="fanduel",
+            american_odds=120,
+        ),
+    ]
+
+    assert prop_odds_by_sportsbook(quotes) == {}
+
+
+def _prop_market(player_name, stat, line):
+    return PlayerPropMarket(
+        ticker=f"KX-{player_name}-{line}",
+        event_ticker="KXNFLPASSYDS-26SEP20MIASF",
+        stat=stat,
+        player_name=player_name,
+        line=line,
+        yes_bid=Decimal("0.45"),
+        yes_ask=Decimal("0.47"),
+        no_bid=Decimal("0.53"),
+        no_ask=Decimal("0.55"),
+    )
+
+
+def test_find_prop_market_matches_player_stat_and_line_exactly():
+    markets = [
+        _prop_market("Brock Purdy", "passing_yards", 257.5),
+        _prop_market("Brock Purdy", "passing_yards", 274.5),
+    ]
+
+    assert find_prop_market(markets, "Brock Purdy", "passing_yards", 257.5).line == 257.5
+    assert find_prop_market(markets, "Brock Purdy", "passing_yards", 300.5) is None
+    assert find_prop_market(markets, "Brock Purdy", "rushing_yards", 257.5) is None
+    assert find_prop_market(markets, "Someone Else", "passing_yards", 257.5) is None

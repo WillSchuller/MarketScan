@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.config import load_settings
-from src.kalshi import get_open_markets
-from src.models import Event, PredictionMarket, SportsbookQuote
+from src.kalshi import SERIES_TICKER_TEMPLATE, get_open_markets, get_player_prop_markets
+from src.models import Event, PlayerPropMarket, PredictionMarket, SportsbookQuote
 from src.sports_odds import get_todays_upcoming_events, parse_sportsbook_quotes
 from src.time_utils import get_today_utc_window
 
@@ -92,6 +92,55 @@ def find_team_market(
     return None
 
 
+def kalshi_game_ticker_suffix(league: str, matches: list[PredictionMarket]) -> str | None:
+    """Extract the per-game ticker suffix shared with that game's prop markets.
+
+    e.g. event_ticker "KXNFLGAME-26SEP20MIASF" -> "26SEP20MIASF", which is
+    also the suffix on that same game's KXNFLPASSYDS-26SEP20MIASF etc.
+    (confirmed live; see get_player_prop_markets).
+    """
+    prefix = f"{SERIES_TICKER_TEMPLATE.format(league_id=league)}-"
+    for market in matches:
+        if market.event_ticker.startswith(prefix):
+            return market.event_ticker.removeprefix(prefix)
+    return None
+
+
+def prop_odds_by_sportsbook(
+    sportsbook_quotes: list[SportsbookQuote],
+) -> dict[tuple[str, str, float], dict[str, dict[str, int]]]:
+    """Group each sportsbook's game-period player-prop odds by (player, stat, line)."""
+    by_prop: dict[tuple[str, str, float], dict[str, dict[str, int]]] = {}
+    for quote in sportsbook_quotes:
+        if (
+            quote.player_id is None
+            or quote.bet_type != "ou"
+            or quote.period != "game"
+            or quote.side not in ("over", "under")
+            or quote.line is None
+        ):
+            continue
+        key = (quote.player_name or "", quote.stat, quote.line)
+        by_prop.setdefault(key, {}).setdefault(quote.sportsbook, {})[quote.side] = quote.american_odds
+
+    return by_prop
+
+
+def find_prop_market(
+    prop_markets: list[PlayerPropMarket], player_name: str, stat: str, line: float
+) -> PlayerPropMarket | None:
+    """Conservative exact match: same player, same stat, same line."""
+    normalized_player = normalize_name(player_name)
+    for market in prop_markets:
+        if (
+            market.stat == stat
+            and market.line == line
+            and normalize_name(market.player_name) == normalized_player
+        ):
+            return market
+    return None
+
+
 def _format_american_odds(odds: int | None) -> str:
     return f"{odds:+d}" if odds is not None else "-"
 
@@ -125,6 +174,32 @@ def _print_moneyline_comparison(
         print(f"{'kalshi (yes ask)':<18}{away_price:>16} {home_price:>16}")
 
 
+def _print_prop_comparisons(
+    sportsbook_quotes: list[SportsbookQuote],
+    prop_markets: list[PlayerPropMarket],
+) -> None:
+    by_prop = prop_odds_by_sportsbook(sportsbook_quotes)
+    if not by_prop or not prop_markets:
+        return
+
+    for (player_name, stat, line), sportsbooks in sorted(by_prop.items()):
+        market = find_prop_market(prop_markets, player_name, stat, line)
+        if market is None:
+            continue
+
+        print(f"\n{player_name} {stat} {line}")
+        print(f"{'':<18}{'Over':>10} {'Under':>10}")
+        for sportsbook in sorted(sportsbooks):
+            sides = sportsbooks[sportsbook]
+            over_odds = _format_american_odds(sides.get("over"))
+            under_odds = _format_american_odds(sides.get("under"))
+            print(f"{sportsbook:<18}{over_odds:>10} {under_odds:>10}")
+
+        yes_price = _format_kalshi_price(market.yes_ask)
+        no_price = _format_kalshi_price(market.no_ask)
+        print(f"{'kalshi (ask)':<18}{yes_price:>10} {no_price:>10}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -148,21 +223,30 @@ def main() -> None:
             )
         )
 
-    print(f"Upcoming games today: {len(todays_events)}\n")
+        print(f"Upcoming games today: {len(todays_events)}\n")
 
-    for event, raw_event in todays_events:
-        sportsbook_quotes = list(parse_sportsbook_quotes(raw_event))
-        matches = find_potential_matches(event, markets)
-        local_start = event.start_time_utc.astimezone(local_tz)
+        for event, raw_event in todays_events:
+            sportsbook_quotes = list(parse_sportsbook_quotes(raw_event))
+            matches = find_potential_matches(event, markets)
+            local_start = event.start_time_utc.astimezone(local_tz)
 
-        print(event.league)
-        print(f"{event.away_team} @ {event.home_team}")
-        print(f"Start: {local_start.strftime('%I:%M %p %Z').lstrip('0')}")
-        print(f"Sportsbook markets: {len(sportsbook_quotes)}")
-        print(f"Kalshi matches: {len(matches)}")
-        if matches:
-            _print_moneyline_comparison(event, sportsbook_quotes, matches)
-        print()
+            print(event.league)
+            print(f"{event.away_team} @ {event.home_team}")
+            print(f"Start: {local_start.strftime('%I:%M %p %Z').lstrip('0')}")
+            print(f"Sportsbook markets: {len(sportsbook_quotes)}")
+            print(f"Kalshi matches: {len(matches)}")
+            if matches:
+                _print_moneyline_comparison(event, sportsbook_quotes, matches)
+
+                # Only fetch player-prop markets once a game-level match already
+                # exists (see CLAUDE.md's API Efficiency guidance).
+                game_suffix = kalshi_game_ticker_suffix(event.league, matches)
+                if game_suffix:
+                    prop_markets = list(
+                        get_player_prop_markets(settings, client, event.league, game_suffix)
+                    )
+                    _print_prop_comparisons(sportsbook_quotes, prop_markets)
+            print()
 
 
 if __name__ == "__main__":

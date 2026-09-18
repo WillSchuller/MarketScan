@@ -28,6 +28,19 @@ class PredictionMarket:
 
 
 @dataclass(frozen=True)
+class PlayerPropMarket:
+    ticker: str
+    event_ticker: str
+    stat: str
+    player_name: str
+    line: float
+    yes_bid: Decimal | None
+    yes_ask: Decimal | None
+    no_bid: Decimal | None
+    no_ask: Decimal | None
+
+
+@dataclass(frozen=True)
 class SportsbookQuote:
     event_id: str
     player_id: str | None
