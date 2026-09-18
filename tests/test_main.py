@@ -1,6 +1,10 @@
 from decimal import Decimal
 
 from src.main import (
+    _average_fair_probabilities,
+    _devig_two_way,
+    _expected_value,
+    _implied_probability,
     find_potential_matches,
     find_prop_market,
     find_team_market,
@@ -241,3 +245,61 @@ def test_find_prop_market_matches_player_stat_and_line_exactly():
     assert find_prop_market(markets, "Brock Purdy", "passing_yards", 300.5) is None
     assert find_prop_market(markets, "Brock Purdy", "rushing_yards", 257.5) is None
     assert find_prop_market(markets, "Someone Else", "passing_yards", 257.5) is None
+
+
+def test_implied_probability_matches_known_values():
+    assert _implied_probability(-110) == Decimal(110) / Decimal(210)
+    assert _implied_probability(150) == Decimal(100) / Decimal(250)
+
+
+def test_devig_two_way_normalizes_to_sum_of_one():
+    fair_a, fair_b = _devig_two_way(-110, -110)
+
+    assert round(fair_a, 6) == Decimal("0.5")
+    assert round(fair_b, 6) == Decimal("0.5")
+    assert round(fair_a + fair_b, 6) == Decimal("1")
+
+
+def test_devig_two_way_favorite_underdog():
+    fair_favorite, fair_underdog = _devig_two_way(-200, 150)
+
+    assert round(fair_favorite, 6) == Decimal("0.625")
+    assert round(fair_underdog, 6) == Decimal("0.375")
+
+
+def test_average_fair_probabilities_skips_sportsbook_missing_a_side():
+    sides_by_sportsbook = {
+        "book_a": {"over": -110, "under": -110},
+        "book_b": {"over": -120, "under": 100},
+        "book_c": {"over": -115},  # missing "under"; cannot be de-vigged
+    }
+
+    avg_over, avg_under = _average_fair_probabilities(sides_by_sportsbook, "over", "under")
+
+    fair_a_over, fair_a_under = _devig_two_way(-110, -110)
+    fair_b_over, fair_b_under = _devig_two_way(-120, 100)
+    assert avg_over == (fair_a_over + fair_b_over) / 2
+    assert avg_under == (fair_a_under + fair_b_under) / 2
+
+
+def test_average_fair_probabilities_none_when_no_complete_sportsbook():
+    sides_by_sportsbook = {"book_a": {"over": -110}}
+
+    avg_over, avg_under = _average_fair_probabilities(sides_by_sportsbook, "over", "under")
+
+    assert avg_over is None
+    assert avg_under is None
+
+
+def test_expected_value_positive_when_fair_probability_exceeds_price():
+    assert _expected_value(Decimal("0.6"), Decimal("0.50")) == Decimal("0.2")
+
+
+def test_expected_value_negative_when_price_exceeds_fair_probability():
+    assert _expected_value(Decimal("0.4"), Decimal("0.50")) == Decimal("-0.2")
+
+
+def test_expected_value_none_when_inputs_missing():
+    assert _expected_value(None, Decimal("0.50")) is None
+    assert _expected_value(Decimal("0.6"), None) is None
+    assert _expected_value(Decimal("0.6"), Decimal("0")) is None

@@ -141,12 +141,67 @@ def find_prop_market(
     return None
 
 
+def _implied_probability(odds: int) -> Decimal:
+    """Convert American odds to raw, vig-inclusive implied probability."""
+    if odds > 0:
+        return Decimal(100) / Decimal(odds + 100)
+    return Decimal(-odds) / Decimal(-odds + 100)
+
+
+def _devig_two_way(odds_a: int, odds_b: int) -> tuple[Decimal, Decimal]:
+    """Remove the vig from one sportsbook's two-way market.
+
+    Normalizes the pair's implied probabilities (which sum to more than 1
+    because of the sportsbook's hold) so they sum to exactly 1.
+    """
+    prob_a = _implied_probability(odds_a)
+    prob_b = _implied_probability(odds_b)
+    total = prob_a + prob_b
+    return prob_a / total, prob_b / total
+
+
+def _average_fair_probabilities(
+    sides_by_sportsbook: dict[str, dict[str, int]], side_a: str, side_b: str
+) -> tuple[Decimal | None, Decimal | None]:
+    """Average de-vigged fair probabilities for each side across sportsbooks quoting both.
+
+    A sportsbook missing either side of the market cannot be de-vigged and is
+    skipped rather than guessed at.
+    """
+    fair_a: list[Decimal] = []
+    fair_b: list[Decimal] = []
+    for sides in sides_by_sportsbook.values():
+        if side_a in sides and side_b in sides:
+            prob_a, prob_b = _devig_two_way(sides[side_a], sides[side_b])
+            fair_a.append(prob_a)
+            fair_b.append(prob_b)
+
+    avg_a = sum(fair_a) / len(fair_a) if fair_a else None
+    avg_b = sum(fair_b) / len(fair_b) if fair_b else None
+    return avg_a, avg_b
+
+
+def _expected_value(fair_probability: Decimal | None, price: Decimal | None) -> Decimal | None:
+    """Expected value per $1 risked, using the sportsbook consensus as fair value."""
+    if fair_probability is None or price is None or price == 0:
+        return None
+    return (fair_probability - price) / price
+
+
 def _format_american_odds(odds: int | None) -> str:
     return f"{odds:+d}" if odds is not None else "-"
 
 
 def _format_kalshi_price(price: Decimal | None) -> str:
     return f"${price:.2f}" if price is not None else "-"
+
+
+def _format_kalshi_price_with_ev(price: Decimal | None, ev: Decimal | None) -> str:
+    if price is None:
+        return "-"
+    if ev is None:
+        return _format_kalshi_price(price)
+    return f"{_format_kalshi_price(price)} ({ev:+.1%} EV)"
 
 
 def _print_moneyline_comparison(
@@ -161,17 +216,26 @@ def _print_moneyline_comparison(
     home_market = find_team_market(matches, event.home_team)
     away_market = find_team_market(matches, event.away_team)
 
-    print(f"{'Moneyline':<18}{event.away_team:>16} {event.home_team:>16}")
+    print(f"{'Moneyline':<18}{event.away_team:>22} {event.home_team:>22}")
     for sportsbook in sorted(moneyline):
         sides = moneyline[sportsbook]
         away_odds = _format_american_odds(sides.get("away"))
         home_odds = _format_american_odds(sides.get("home"))
-        print(f"{sportsbook:<18}{away_odds:>16} {home_odds:>16}")
+        print(f"{sportsbook:<18}{away_odds:>22} {home_odds:>22}")
 
     if home_market or away_market:
-        away_price = _format_kalshi_price(away_market.yes_ask if away_market else None)
-        home_price = _format_kalshi_price(home_market.yes_ask if home_market else None)
-        print(f"{'kalshi (yes ask)':<18}{away_price:>16} {home_price:>16}")
+        away_price = away_market.yes_ask if away_market else None
+        home_price = home_market.yes_ask if home_market else None
+        # Consensus fair value comes from de-vigging and averaging the same
+        # sportsbook moneylines shown above, not from Kalshi itself.
+        avg_away_fair, avg_home_fair = _average_fair_probabilities(moneyline, "away", "home")
+        away_display = _format_kalshi_price_with_ev(
+            away_price, _expected_value(avg_away_fair, away_price)
+        )
+        home_display = _format_kalshi_price_with_ev(
+            home_price, _expected_value(avg_home_fair, home_price)
+        )
+        print(f"{'kalshi (yes ask)':<18}{away_display:>22} {home_display:>22}")
 
 
 def _print_prop_comparisons(
@@ -188,16 +252,23 @@ def _print_prop_comparisons(
             continue
 
         print(f"\n{player_name} {stat} {line}")
-        print(f"{'':<18}{'Over':>10} {'Under':>10}")
+        print(f"{'':<18}{'Over':>22} {'Under':>22}")
         for sportsbook in sorted(sportsbooks):
             sides = sportsbooks[sportsbook]
             over_odds = _format_american_odds(sides.get("over"))
             under_odds = _format_american_odds(sides.get("under"))
-            print(f"{sportsbook:<18}{over_odds:>10} {under_odds:>10}")
+            print(f"{sportsbook:<18}{over_odds:>22} {under_odds:>22}")
 
-        yes_price = _format_kalshi_price(market.yes_ask)
-        no_price = _format_kalshi_price(market.no_ask)
-        print(f"{'kalshi (ask)':<18}{yes_price:>10} {no_price:>10}")
+        # Kalshi player-prop markets are threshold ladders where "yes" means
+        # the stat lands over the line (see kalshi.py), matching Over/Under.
+        avg_over_fair, avg_under_fair = _average_fair_probabilities(sportsbooks, "over", "under")
+        over_display = _format_kalshi_price_with_ev(
+            market.yes_ask, _expected_value(avg_over_fair, market.yes_ask)
+        )
+        under_display = _format_kalshi_price_with_ev(
+            market.no_ask, _expected_value(avg_under_fair, market.no_ask)
+        )
+        print(f"{'kalshi (ask)':<18}{over_display:>22} {under_display:>22}")
 
 
 def main() -> None:
