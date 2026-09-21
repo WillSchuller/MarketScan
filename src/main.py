@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,6 +16,10 @@ from src.sports_odds import get_todays_upcoming_events, parse_sportsbook_quotes
 from src.time_utils import get_today_utc_window
 
 logger = logging.getLogger(__name__)
+
+# The Desktop folder is OneDrive-redirected on this machine (see CLAUDE.md's
+# Environment section); write there so the file is where the user expects it.
+OPPORTUNITIES_FILE = Path.home() / "OneDrive" / "Desktop" / "opportunities.txt"
 
 
 def normalize_name(value: str) -> str:
@@ -208,6 +213,7 @@ def _print_moneyline_comparison(
     event: Event,
     sportsbook_quotes: list[SportsbookQuote],
     matches: list[PredictionMarket],
+    opportunities: list[str],
 ) -> None:
     moneyline = moneyline_by_sportsbook(sportsbook_quotes)
     if not moneyline and not matches:
@@ -229,18 +235,30 @@ def _print_moneyline_comparison(
         # Consensus fair value comes from de-vigging and averaging the same
         # sportsbook moneylines shown above, not from Kalshi itself.
         avg_away_fair, avg_home_fair = _average_fair_probabilities(moneyline, "away", "home")
-        away_display = _format_kalshi_price_with_ev(
-            away_price, _expected_value(avg_away_fair, away_price)
-        )
-        home_display = _format_kalshi_price_with_ev(
-            home_price, _expected_value(avg_home_fair, home_price)
-        )
+        away_ev = _expected_value(avg_away_fair, away_price)
+        home_ev = _expected_value(avg_home_fair, home_price)
+        away_display = _format_kalshi_price_with_ev(away_price, away_ev)
+        home_display = _format_kalshi_price_with_ev(home_price, home_ev)
         print(f"{'kalshi (yes ask)':<18}{away_display:>22} {home_display:>22}")
+
+        if away_ev is not None and away_ev > 0:
+            opportunities.append(
+                f"{event.league}: {event.away_team} @ {event.home_team} -- "
+                f"{event.away_team} moneyline {_format_kalshi_price(away_price)} "
+                f"({away_ev:+.1%} EV)"
+            )
+        if home_ev is not None and home_ev > 0:
+            opportunities.append(
+                f"{event.league}: {event.away_team} @ {event.home_team} -- "
+                f"{event.home_team} moneyline {_format_kalshi_price(home_price)} "
+                f"({home_ev:+.1%} EV)"
+            )
 
 
 def _print_prop_comparisons(
     sportsbook_quotes: list[SportsbookQuote],
     prop_markets: list[PlayerPropMarket],
+    opportunities: list[str],
 ) -> None:
     by_prop = prop_odds_by_sportsbook(sportsbook_quotes)
     if not by_prop or not prop_markets:
@@ -262,13 +280,30 @@ def _print_prop_comparisons(
         # Kalshi player-prop markets are threshold ladders where "yes" means
         # the stat lands over the line (see kalshi.py), matching Over/Under.
         avg_over_fair, avg_under_fair = _average_fair_probabilities(sportsbooks, "over", "under")
-        over_display = _format_kalshi_price_with_ev(
-            market.yes_ask, _expected_value(avg_over_fair, market.yes_ask)
-        )
-        under_display = _format_kalshi_price_with_ev(
-            market.no_ask, _expected_value(avg_under_fair, market.no_ask)
-        )
+        over_ev = _expected_value(avg_over_fair, market.yes_ask)
+        under_ev = _expected_value(avg_under_fair, market.no_ask)
+        over_display = _format_kalshi_price_with_ev(market.yes_ask, over_ev)
+        under_display = _format_kalshi_price_with_ev(market.no_ask, under_ev)
         print(f"{'kalshi (ask)':<18}{over_display:>22} {under_display:>22}")
+
+        if over_ev is not None and over_ev > 0:
+            opportunities.append(
+                f"{player_name} {stat} {line} Over "
+                f"{_format_kalshi_price(market.yes_ask)} ({over_ev:+.1%} EV)"
+            )
+        if under_ev is not None and under_ev > 0:
+            opportunities.append(
+                f"{player_name} {stat} {line} Under "
+                f"{_format_kalshi_price(market.no_ask)} ({under_ev:+.1%} EV)"
+            )
+
+
+def _write_opportunities(opportunities: list[str]) -> None:
+    """Overwrite the desktop opportunities file with this run's positive-EV positions."""
+    OPPORTUNITIES_FILE.write_text(
+        "\n".join(opportunities) + "\n" if opportunities else "", encoding="utf-8"
+    )
+    logger.info("Positive EV opportunities: %d (%s)", len(opportunities), OPPORTUNITIES_FILE)
 
 
 def main() -> None:
@@ -277,6 +312,7 @@ def main() -> None:
     settings = load_settings()
     start_utc, end_utc = get_today_utc_window(settings.app_timezone)
     local_tz = ZoneInfo(settings.app_timezone)
+    opportunities: list[str] = []
 
     with httpx.Client(timeout=10.0) as client:
         todays_events = list(
@@ -307,7 +343,7 @@ def main() -> None:
             print(f"Sportsbook markets: {len(sportsbook_quotes)}")
             print(f"Kalshi matches: {len(matches)}")
             if matches:
-                _print_moneyline_comparison(event, sportsbook_quotes, matches)
+                _print_moneyline_comparison(event, sportsbook_quotes, matches, opportunities)
 
                 # Only fetch player-prop markets once a game-level match already
                 # exists (see CLAUDE.md's API Efficiency guidance).
@@ -316,8 +352,10 @@ def main() -> None:
                     prop_markets = list(
                         get_player_prop_markets(settings, client, event.league, game_suffix)
                     )
-                    _print_prop_comparisons(sportsbook_quotes, prop_markets)
+                    _print_prop_comparisons(sportsbook_quotes, prop_markets, opportunities)
             print()
+
+        _write_opportunities(opportunities)
 
 
 if __name__ == "__main__":
