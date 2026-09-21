@@ -201,6 +201,21 @@ def _format_kalshi_price(price: Decimal | None) -> str:
     return f"${price:.2f}" if price is not None else "-"
 
 
+def _fair_probability_to_american_odds(fair_probability: Decimal | None) -> int | None:
+    """Convert an averaged de-vigged fair probability back to American odds."""
+    if fair_probability is None or fair_probability <= 0 or fair_probability >= 1:
+        return None
+    if fair_probability >= Decimal("0.5"):
+        odds = -Decimal(100) * fair_probability / (Decimal(1) - fair_probability)
+    else:
+        odds = Decimal(100) * (Decimal(1) - fair_probability) / fair_probability
+    return round(odds)
+
+
+def _format_fair_odds(fair_probability: Decimal | None) -> str:
+    return _format_american_odds(_fair_probability_to_american_odds(fair_probability))
+
+
 def _format_kalshi_price_with_ev(price: Decimal | None, ev: Decimal | None) -> str:
     if price is None:
         return "-"
@@ -245,13 +260,13 @@ def _print_moneyline_comparison(
             opportunities.append(
                 f"{event.league}: {event.away_team} @ {event.home_team} -- "
                 f"{event.away_team} moneyline {_format_kalshi_price(away_price)} "
-                f"({away_ev:+.1%} EV)"
+                f"({away_ev:+.1%} EV) -- Fair odds: {_format_fair_odds(avg_away_fair)}"
             )
         if home_ev is not None and home_ev > 0:
             opportunities.append(
                 f"{event.league}: {event.away_team} @ {event.home_team} -- "
                 f"{event.home_team} moneyline {_format_kalshi_price(home_price)} "
-                f"({home_ev:+.1%} EV)"
+                f"({home_ev:+.1%} EV) -- Fair odds: {_format_fair_odds(avg_home_fair)}"
             )
 
 
@@ -289,12 +304,14 @@ def _print_prop_comparisons(
         if over_ev is not None and over_ev > 0:
             opportunities.append(
                 f"{player_name} {stat} {line} Over "
-                f"{_format_kalshi_price(market.yes_ask)} ({over_ev:+.1%} EV)"
+                f"{_format_kalshi_price(market.yes_ask)} ({over_ev:+.1%} EV) "
+                f"-- Fair odds: {_format_fair_odds(avg_over_fair)}"
             )
         if under_ev is not None and under_ev > 0:
             opportunities.append(
                 f"{player_name} {stat} {line} Under "
-                f"{_format_kalshi_price(market.no_ask)} ({under_ev:+.1%} EV)"
+                f"{_format_kalshi_price(market.no_ask)} ({under_ev:+.1%} EV) "
+                f"-- Fair odds: {_format_fair_odds(avg_under_fair)}"
             )
 
 
