@@ -55,6 +55,15 @@ PLAYER_PROP_SERIES: dict[str, dict[str, str]] = {
         "batting_stolenBases": "KXMLBSB",
         "pitching_strikeouts": "KXMLBKS",
     },
+    # SportsGameOdds' generic "points" stat is goals scored in hockey, and its
+    # "goals+assists" is hockey points (confirmed live: SGO "points" over 0.5
+    # lines up with Kalshi's "1+ goals" market for the same player).
+    "NHL": {
+        "points": "KXNHLGOAL",
+        "goals+assists": "KXNHLPTS",
+        "assists": "KXNHLAST",
+        "goalie_saves": "KXNHLSAVE",
+    },
 }
 
 

@@ -50,5 +50,5 @@ def load_settings() -> Settings:
         kalshi_base_url=kalshi_base_url,
         # This subscription tier requires an explicit leagueID or eventID on
         # every /events request; there is no "all leagues" option available.
-        league_ids=os.getenv("LEAGUE_IDS", "NFL,MLB"),
+        league_ids=os.getenv("LEAGUE_IDS", "NFL,MLB,NHL"),
     )

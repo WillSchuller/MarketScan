@@ -11,6 +11,7 @@ from src.main import (
     kalshi_game_ticker_suffix,
     moneyline_by_sportsbook,
     normalize_name,
+    stat_label,
     prop_odds_by_sportsbook,
 )
 from src.models import Event, PlayerPropMarket, PredictionMarket, SportsbookQuote
@@ -41,6 +42,16 @@ def _market(event_ticker, title, ticker=None):
 
 def test_normalize_name_collapses_whitespace_and_case():
     assert normalize_name("  Buffalo   Bills  ") == "buffalo bills"
+
+
+def test_stat_label_shows_nhl_points_as_goals():
+    assert stat_label("NHL", "points") == "goals"
+    assert stat_label("NHL", "goals+assists") == "goals+assists"
+    assert stat_label("NFL", "points") == "points"
+
+
+def test_normalize_name_strips_accents():
+    assert normalize_name("Montréal Canadiens") == "montreal canadiens"
 
 
 def test_matches_when_both_teams_present_in_same_kalshi_event():

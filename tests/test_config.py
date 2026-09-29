@@ -29,7 +29,7 @@ def test_load_settings_uses_defaults(monkeypatch):
     assert settings.app_timezone == "America/Chicago"
     assert settings.kalshi_environment == "production"
     assert settings.kalshi_base_url == "https://api.elections.kalshi.com/trade-api/v2"
-    assert settings.league_ids == "NFL,MLB"
+    assert settings.league_ids == "NFL,MLB,NHL"
 
 
 def test_load_settings_missing_api_key_raises(monkeypatch):

@@ -300,7 +300,7 @@ def test_player_props_empty_for_unmapped_league():
         raise AssertionError("should not request markets for an unmapped league")
 
     with _client(handler) as client:
-        markets = list(get_player_prop_markets(SETTINGS, client, "NHL", "26SEP20ABCXYZ"))
+        markets = list(get_player_prop_markets(SETTINGS, client, "NBA", "26SEP20ABCXYZ"))
 
     assert markets == []
 

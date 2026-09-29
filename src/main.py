@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import unicodedata
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,8 +24,13 @@ OPPORTUNITIES_FILE = Path.home() / "OneDrive" / "Desktop" / "opportunities.txt"
 
 
 def normalize_name(value: str) -> str:
-    """Lowercase, strip, and collapse whitespace for conservative name matching."""
-    return " ".join(value.lower().strip().split())
+    """Lowercase, strip accents, and collapse whitespace for conservative name matching."""
+    # Kalshi drops diacritics that SportsGameOdds keeps (e.g. "Montreal" vs
+    # "Montréal Canadiens"), so compare on the unaccented base letters.
+    unaccented = "".join(
+        char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)
+    )
+    return " ".join(unaccented.lower().strip().split())
 
 
 def _team_phrase(market_title: str) -> str:
@@ -270,7 +276,17 @@ def _print_moneyline_comparison(
             )
 
 
+def stat_label(league: str, stat: str) -> str:
+    """Display name for a SportsGameOdds statID."""
+    # SGO's generic "points" statID means goals scored in hockey, which reads
+    # as hockey points (goals + assists) unless relabeled.
+    if league == "NHL" and stat == "points":
+        return "goals"
+    return stat
+
+
 def _print_prop_comparisons(
+    league: str,
     sportsbook_quotes: list[SportsbookQuote],
     prop_markets: list[PlayerPropMarket],
     opportunities: list[str],
@@ -284,7 +300,8 @@ def _print_prop_comparisons(
         if market is None:
             continue
 
-        print(f"\n{player_name} {stat} {line}")
+        label = stat_label(league, stat)
+        print(f"\n{player_name} {label} {line}")
         print(f"{'':<18}{'Over':>22} {'Under':>22}")
         for sportsbook in sorted(sportsbooks):
             sides = sportsbooks[sportsbook]
@@ -303,13 +320,13 @@ def _print_prop_comparisons(
 
         if over_ev is not None and over_ev > 0:
             opportunities.append(
-                f"{player_name} {stat} {line} Over "
+                f"{player_name} {label} {line} Over "
                 f"{_format_kalshi_price(market.yes_ask)} ({over_ev:+.1%} EV) "
                 f"-- Fair odds: {_format_fair_odds(avg_over_fair)}"
             )
         if under_ev is not None and under_ev > 0:
             opportunities.append(
-                f"{player_name} {stat} {line} Under "
+                f"{player_name} {label} {line} Under "
                 f"{_format_kalshi_price(market.no_ask)} ({under_ev:+.1%} EV) "
                 f"-- Fair odds: {_format_fair_odds(avg_under_fair)}"
             )
@@ -369,7 +386,9 @@ def main() -> None:
                     prop_markets = list(
                         get_player_prop_markets(settings, client, event.league, game_suffix)
                     )
-                    _print_prop_comparisons(sportsbook_quotes, prop_markets, opportunities)
+                    _print_prop_comparisons(
+                        event.league, sportsbook_quotes, prop_markets, opportunities
+                    )
             print()
 
         _write_opportunities(opportunities)
