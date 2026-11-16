@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from dotenv import load_dotenv
+
+from src.valuation import FeePolicy
 
 load_dotenv()
 
@@ -24,6 +27,7 @@ class Settings:
     kalshi_environment: str
     kalshi_base_url: str
     league_ids: str
+    fee_policy: FeePolicy = FeePolicy()
 
 
 def load_settings() -> Settings:
@@ -43,6 +47,15 @@ def load_settings() -> Settings:
             f"got {kalshi_environment!r}."
         )
 
+    try:
+        fee_policy = FeePolicy(
+            contracts=int(os.getenv('EV_CONTRACTS', '1')),
+            taker_multiplier=Decimal(os.getenv('KALSHI_TAKER_FEE_MULTIPLIER', '1')),
+            balance_precision=Decimal(os.getenv('KALSHI_BALANCE_PRECISION', '0.0001')),
+        )
+    except (ValueError, InvalidOperation) as exc:
+        raise RuntimeError(f'Invalid net-EV fee configuration: {exc}') from exc
+
     return Settings(
         sports_game_odds_api_key=api_key,
         app_timezone=os.getenv("APP_TIMEZONE", "America/Chicago"),
@@ -50,5 +63,6 @@ def load_settings() -> Settings:
         kalshi_base_url=kalshi_base_url,
         # This subscription tier requires an explicit leagueID or eventID on
         # every /events request; there is no "all leagues" option available.
-        league_ids=os.getenv("LEAGUE_IDS", "NFL,MLB,NHL"),
+        league_ids=os.getenv("LEAGUE_IDS", "NFL,MLB,NBA"),
+        fee_policy=fee_policy,
     )

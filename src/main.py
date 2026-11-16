@@ -15,6 +15,7 @@ from src.kalshi import SERIES_TICKER_TEMPLATE, get_open_markets, get_player_prop
 from src.models import Event, PlayerPropMarket, PredictionMarket, SportsbookQuote
 from src.sports_odds import get_todays_upcoming_events, parse_sportsbook_quotes
 from src.time_utils import get_today_utc_window
+from src.valuation import FeePolicy, NetValue, Opportunity, calculate_net_value, rank_opportunities
 
 logger = logging.getLogger(__name__)
 
@@ -222,19 +223,23 @@ def _format_fair_odds(fair_probability: Decimal | None) -> str:
     return _format_american_odds(_fair_probability_to_american_odds(fair_probability))
 
 
-def _format_kalshi_price_with_ev(price: Decimal | None, ev: Decimal | None) -> str:
+def _format_kalshi_price_with_ev(price: Decimal | None, value: NetValue | None) -> str:
     if price is None:
         return "-"
-    if ev is None:
+    if value is None:
         return _format_kalshi_price(price)
-    return f"{_format_kalshi_price(price)} ({ev:+.1%} EV)"
+    return (
+        f"{_format_kalshi_price(price)} (net EV: {value.net_ev:+.2%}; "
+        f"gross EV: {value.gross_ev:+.2%})"
+    )
 
 
 def _print_moneyline_comparison(
     event: Event,
     sportsbook_quotes: list[SportsbookQuote],
     matches: list[PredictionMarket],
-    opportunities: list[str],
+    opportunities: list[Opportunity],
+    fee_policy: FeePolicy = FeePolicy(),
 ) -> None:
     moneyline = moneyline_by_sportsbook(sportsbook_quotes)
     if not moneyline and not matches:
@@ -256,23 +261,25 @@ def _print_moneyline_comparison(
         # Consensus fair value comes from de-vigging and averaging the same
         # sportsbook moneylines shown above, not from Kalshi itself.
         avg_away_fair, avg_home_fair = _average_fair_probabilities(moneyline, "away", "home")
-        away_ev = _expected_value(avg_away_fair, away_price)
-        home_ev = _expected_value(avg_home_fair, home_price)
-        away_display = _format_kalshi_price_with_ev(away_price, away_ev)
-        home_display = _format_kalshi_price_with_ev(home_price, home_ev)
+        away_value = calculate_net_value(avg_away_fair, away_price, fee_policy)
+        home_value = calculate_net_value(avg_home_fair, home_price, fee_policy)
+        away_display = _format_kalshi_price_with_ev(away_price, away_value)
+        home_display = _format_kalshi_price_with_ev(home_price, home_value)
         print(f"{'kalshi (yes ask)':<18}{away_display:>22} {home_display:>22}")
 
-        if away_ev is not None and away_ev > 0:
+        if away_value is not None and away_value.net_ev > 0:
             opportunities.append(
-                f"{event.league}: {event.away_team} @ {event.home_team} -- "
-                f"{event.away_team} moneyline {_format_kalshi_price(away_price)} "
-                f"({away_ev:+.1%} EV) -- Fair odds: {_format_fair_odds(avg_away_fair)}"
+                Opportunity(
+                    f"{event.league}: {event.away_team} @ {event.home_team} -- {event.away_team} moneyline",
+                    away_market.ticker, 'YES', away_value,
+                )
             )
-        if home_ev is not None and home_ev > 0:
+        if home_value is not None and home_value.net_ev > 0:
             opportunities.append(
-                f"{event.league}: {event.away_team} @ {event.home_team} -- "
-                f"{event.home_team} moneyline {_format_kalshi_price(home_price)} "
-                f"({home_ev:+.1%} EV) -- Fair odds: {_format_fair_odds(avg_home_fair)}"
+                Opportunity(
+                    f"{event.league}: {event.away_team} @ {event.home_team} -- {event.home_team} moneyline",
+                    home_market.ticker, 'YES', home_value,
+                )
             )
 
 
@@ -289,7 +296,8 @@ def _print_prop_comparisons(
     league: str,
     sportsbook_quotes: list[SportsbookQuote],
     prop_markets: list[PlayerPropMarket],
-    opportunities: list[str],
+    opportunities: list[Opportunity],
+    fee_policy: FeePolicy = FeePolicy(),
 ) -> None:
     by_prop = prop_odds_by_sportsbook(sportsbook_quotes)
     if not by_prop or not prop_markets:
@@ -312,32 +320,50 @@ def _print_prop_comparisons(
         # Kalshi player-prop markets are threshold ladders where "yes" means
         # the stat lands over the line (see kalshi.py), matching Over/Under.
         avg_over_fair, avg_under_fair = _average_fair_probabilities(sportsbooks, "over", "under")
-        over_ev = _expected_value(avg_over_fair, market.yes_ask)
-        under_ev = _expected_value(avg_under_fair, market.no_ask)
-        over_display = _format_kalshi_price_with_ev(market.yes_ask, over_ev)
-        under_display = _format_kalshi_price_with_ev(market.no_ask, under_ev)
+        over_value = calculate_net_value(avg_over_fair, market.yes_ask, fee_policy)
+        under_value = calculate_net_value(avg_under_fair, market.no_ask, fee_policy)
+        over_display = _format_kalshi_price_with_ev(market.yes_ask, over_value)
+        under_display = _format_kalshi_price_with_ev(market.no_ask, under_value)
         print(f"{'kalshi (ask)':<18}{over_display:>22} {under_display:>22}")
 
-        if over_ev is not None and over_ev > 0:
+        if over_value is not None and over_value.net_ev > 0:
             opportunities.append(
-                f"{player_name} {label} {line} Over "
-                f"{_format_kalshi_price(market.yes_ask)} ({over_ev:+.1%} EV) "
-                f"-- Fair odds: {_format_fair_odds(avg_over_fair)}"
+                Opportunity(
+                    f"{league}: {player_name} {label} {line} Over",
+                    market.ticker, 'YES', over_value,
+                )
             )
-        if under_ev is not None and under_ev > 0:
+        if under_value is not None and under_value.net_ev > 0:
             opportunities.append(
-                f"{player_name} {label} {line} Under "
-                f"{_format_kalshi_price(market.no_ask)} ({under_ev:+.1%} EV) "
-                f"-- Fair odds: {_format_fair_odds(avg_under_fair)}"
+                Opportunity(
+                    f"{league}: {player_name} {label} {line} Under",
+                    market.ticker, 'NO', under_value,
+                )
             )
 
 
-def _write_opportunities(opportunities: list[str]) -> None:
-    """Overwrite the desktop opportunities file with this run's positive-EV positions."""
+def _ranked_opportunity_lines(opportunities: list[Opportunity]) -> list[str]:
+    lines: list[str] = []
+    for rank, item in enumerate(rank_opportunities(opportunities), 1):
+        value = item.value
+        lines.append(
+            f"{rank}. {item.description} -- {item.ticker} {item.side} "
+            f"{_format_kalshi_price(value.price)} x {value.contracts} "
+            f"-- Net EV: {value.net_ev:+.2%}; Gross EV: {value.gross_ev:+.2%} "
+            f"-- Entry fee: ${value.entry_fee:.4f}; Total cost: ${value.total_cost:.4f} "
+            f"-- Expected net profit: ${value.expected_profit:+.4f} "
+            f"-- Fair odds: {_format_fair_odds(value.fair_probability)}"
+        )
+    return lines
+
+
+def _write_opportunities(opportunities: list[Opportunity]) -> None:
+    """Write positive opportunities ranked by estimated net ROI after entry fees."""
+    lines = _ranked_opportunity_lines(opportunities)
     OPPORTUNITIES_FILE.write_text(
-        "\n".join(opportunities) + "\n" if opportunities else "", encoding="utf-8"
+        "\n".join(lines) + "\n" if lines else "", encoding="utf-8"
     )
-    logger.info("Positive EV opportunities: %d (%s)", len(opportunities), OPPORTUNITIES_FILE)
+    logger.info("Positive net EV opportunities: %d (%s)", len(lines), OPPORTUNITIES_FILE)
 
 
 def main() -> None:
@@ -346,7 +372,13 @@ def main() -> None:
     settings = load_settings()
     start_utc, end_utc = get_today_utc_window(settings.app_timezone)
     local_tz = ZoneInfo(settings.app_timezone)
-    opportunities: list[str] = []
+    opportunities: list[Opportunity] = []
+    print(
+        f"Net EV estimate: {settings.fee_policy.contracts} contract(s) per position; "
+        f"taker multiplier {settings.fee_policy.taker_multiplier}; "
+        f"balance precision ${settings.fee_policy.balance_precision}. "
+        "Assumes one fill at the ask and hold to settlement."
+    )
 
     with httpx.Client(timeout=10.0) as client:
         todays_events = list(
@@ -377,7 +409,9 @@ def main() -> None:
             print(f"Sportsbook markets: {len(sportsbook_quotes)}")
             print(f"Kalshi matches: {len(matches)}")
             if matches:
-                _print_moneyline_comparison(event, sportsbook_quotes, matches, opportunities)
+                _print_moneyline_comparison(
+                    event, sportsbook_quotes, matches, opportunities, settings.fee_policy
+                )
 
                 # Only fetch player-prop markets once a game-level match already
                 # exists (see CLAUDE.md's API Efficiency guidance).
@@ -387,10 +421,14 @@ def main() -> None:
                         get_player_prop_markets(settings, client, event.league, game_suffix)
                     )
                     _print_prop_comparisons(
-                        event.league, sportsbook_quotes, prop_markets, opportunities
+                        event.league, sportsbook_quotes, prop_markets, opportunities,
+                        settings.fee_policy,
                     )
             print()
 
+        print("Ranked opportunities by estimated net EV:")
+        for line in _ranked_opportunity_lines(opportunities):
+            print(line)
         _write_opportunities(opportunities)
 
 

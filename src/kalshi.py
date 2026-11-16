@@ -64,6 +64,16 @@ PLAYER_PROP_SERIES: dict[str, dict[str, str]] = {
         "assists": "KXNHLAST",
         "goalie_saves": "KXNHLSAVE",
     },
+    "NBA": {
+        "points": "KXNBAPTS",
+        "rebounds": "KXNBAREB",
+        "assists": "KXNBAAST",
+        "threePointersMade": "KXNBA3PT",
+        "points+rebounds+assists": "KXNBAPRA",
+        "steals": "KXNBASTL",
+        "blocks": "KXNBABLK",
+        "blocks+steals": "KXNBASTOCK",
+    },
 }
 
 
@@ -151,6 +161,15 @@ def get_player_prop_markets(
             market = _parse_player_prop_market(raw_market, stat_id)
             if market is not None:
                 yield market
+
+
+def get_market_result(base_url: str, client: httpx.Client, ticker: str) -> str:
+    """Return one market's settlement result: "yes", "no", or "" while unsettled.
+
+    Confirmed live: a settled market reports status "finalized" and result "yes"/"no".
+    """
+    payload = _get_with_retry(client, f"{base_url}/markets/{ticker}", {})
+    return payload["market"].get("result") or ""
 
 
 def _get_with_retry(client: httpx.Client, url: str, params: dict[str, str]) -> dict:

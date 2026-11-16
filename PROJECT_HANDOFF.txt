@@ -1,0 +1,1692 @@
+# PROJECT_HANDOFF.md
+
+## Project Name
+
+Sportsbook-to-Kalshi Expected Value Scanner
+
+## Purpose
+
+This project identifies potentially mispriced Kalshi sports contracts by comparing Kalshi prices against fair probabilities estimated from sportsbook odds.
+
+The core idea is:
+
+```text
+Sportsbook odds
+    ↓
+Convert to implied probabilities
+    ↓
+Remove sportsbook vig
+    ↓
+Combine books into a fair probability
+    ↓
+Match the same outcome on Kalshi
+    ↓
+Compare fair probability vs Kalshi price
+    ↓
+Calculate expected value
+```
+
+Kalshi is the execution market.
+
+Sportsbooks are primarily being used as information sources to estimate the fair probability of an outcome.
+
+Do not treat sportsbook odds as the wager being placed.
+
+---
+
+# 1. Primary Goal
+
+For each supported sports market, determine whether a Kalshi contract appears underpriced relative to the broader sportsbook market.
+
+The project should ultimately produce records resembling:
+
+```text
+Dak Prescott passing_touchdowns 2.5 Over
+Kalshi Price: $0.36
+Fair Probability: 39.7%
+Fair Odds: +152
+EV: +10.3%
+```
+
+The system should obtain and calculate these values automatically.
+
+This handoff document intentionally does not define the final filtering or bet-selection strategy.
+
+The priority here is:
+
+- obtaining sportsbook odds
+- obtaining Kalshi prices
+- correctly matching markets
+- normalizing data
+- removing vig
+- estimating fair probability
+- calculating fair odds
+- calculating EV
+- preserving enough raw data to debug incorrect calculations
+
+---
+
+# 2. Core Architecture
+
+The preferred logical pipeline is:
+
+```text
+SPORTSBOOK INGESTION
+        ↓
+RAW SPORTSBOOK DATA
+        ↓
+MARKET NORMALIZATION
+        ↓
+MARKET GROUPING / MATCHING
+        ↓
+IMPLIED PROBABILITY CONVERSION
+        ↓
+VIG REMOVAL
+        ↓
+CONSENSUS FAIR PROBABILITY
+        ↓
+KALSHI INGESTION
+        ↓
+KALSHI ↔ SPORTSBOOK MARKET MATCHING
+        ↓
+EXPECTED VALUE CALCULATION
+        ↓
+OUTPUT / STORAGE
+```
+
+These stages should remain logically separated.
+
+Avoid putting API fetching, normalization, probability calculations, and filtering into one large function.
+
+---
+
+# 3. Suggested Module Responsibilities
+
+The exact filenames can differ, but Codex should preserve clear responsibilities similar to the following.
+
+```text
+sportsbook_client
+    Fetch sportsbook odds.
+
+kalshi_client
+    Fetch Kalshi events, markets, prices, and metadata.
+
+normalizer
+    Convert provider-specific names and structures into a common internal schema.
+
+market_matcher
+    Determine when sportsbook and Kalshi markets represent the same outcome.
+
+odds_math
+    Convert American odds to probabilities and probabilities back to American odds.
+
+vig
+    Remove sportsbook margin from paired outcomes.
+
+consensus
+    Combine fair probabilities from multiple sportsbooks.
+
+ev
+    Compare fair probability with Kalshi price and calculate expected value.
+
+models
+    Define internal representations for games, sportsbook quotes, markets,
+    Kalshi contracts, and calculated opportunities.
+
+storage
+    Optionally persist raw and calculated records.
+
+main / scanner
+    Coordinate the pipeline.
+```
+
+Do not assume these exact filenames are required.
+
+The important goal is separation of responsibility.
+
+---
+
+# 4. Sportsbook Data Ingestion
+
+The system needs sportsbook prices for sports markets such as:
+
+- NFL player props
+- NHL player props
+- MLB player props
+- team moneylines
+- potentially additional sports later
+
+Each sportsbook quote should preserve as much source information as possible.
+
+A useful internal representation is:
+
+```json
+{
+  "sport": "NFL",
+  "league": "NFL",
+  "event_id": "...",
+  "game": "Tampa Bay Buccaneers @ Dallas Cowboys",
+  "start_time": "...",
+
+  "sportsbook": "example_book",
+
+  "player": "Dak Prescott",
+  "market": "passing_touchdowns",
+  "line": 2.5,
+  "side": "over",
+
+  "american_odds": 150,
+
+  "source_updated_at": "...",
+  "fetched_at": "..."
+}
+```
+
+Do not immediately discard provider-specific/raw responses.
+
+Raw source data is valuable for debugging.
+
+---
+
+# 5. Sportsbook API Expectations
+
+When retrieving sportsbook odds:
+
+1. Fetch only relevant sports/leagues.
+2. Prefer upcoming events.
+3. Capture game start times.
+4. Capture sportsbook/bookmaker identity.
+5. Capture market name.
+6. Capture player/team name.
+7. Capture line.
+8. Capture side.
+9. Capture price.
+10. Capture source timestamp if supplied.
+11. Capture local fetch timestamp.
+
+The scanner must be able to distinguish:
+
+```text
+Over 49.5 receiving yards
+```
+
+from:
+
+```text
+Over 54.5 receiving yards
+```
+
+Do not merge these markets.
+
+---
+
+# 6. Market Normalization
+
+Sportsbook APIs and Kalshi may use different names for identical concepts.
+
+Examples:
+
+```text
+Receiving Yards
+Player Receiving Yards
+Rec Yds
+```
+
+should all normalize to something similar to:
+
+```text
+receiving_yards
+```
+
+Likewise:
+
+```text
+Passing TDs
+Passing Touchdowns
+Player Passing Touchdowns
+```
+
+should normalize to:
+
+```text
+passing_touchdowns
+```
+
+A normalized market identity should generally contain:
+
+```text
+sport
+event/game
+player or team
+stat/market
+line
+side/outcome
+```
+
+For example:
+
+```json
+{
+  "event_key": "TB@DAL_2026-10-08",
+  "player": "Dak Prescott",
+  "market": "passing_touchdowns",
+  "line": 2.5,
+  "side": "over"
+}
+```
+
+---
+
+# 7. Player and Team Name Normalization
+
+Names may differ between providers.
+
+Examples:
+
+```text
+A.J. Brown
+AJ Brown
+
+T.J. Hockenson
+TJ Hockenson
+```
+
+The system should normalize superficial differences.
+
+Useful normalization may include:
+
+- lowercase comparison
+- trimming whitespace
+- punctuation normalization
+- apostrophe normalization
+- periods in initials
+- accent normalization where appropriate
+
+However, fuzzy matching must be conservative.
+
+Do not silently match two people just because names are similar.
+
+When uncertain, reject the match rather than calculate EV on the wrong player.
+
+---
+
+# 8. Game Matching
+
+Before matching player props, first establish that both sources refer to the same event.
+
+Useful matching fields include:
+
+```text
+league
+home team
+away team
+event date
+scheduled start time
+```
+
+Allow reasonable formatting differences.
+
+Do not match markets solely based on player name.
+
+A player could appear in stale or incorrectly associated provider data.
+
+---
+
+# 9. American Odds to Implied Probability
+
+Implement one canonical odds-conversion function.
+
+For positive American odds:
+
+```text
+p = 100 / (odds + 100)
+```
+
+Example:
+
+```text
++200 → 0.333333
+```
+
+For negative American odds:
+
+```text
+p = abs(odds) / (abs(odds) + 100)
+```
+
+Example:
+
+```text
+-150 → 0.60
+```
+
+Recommended function:
+
+```text
+american_to_probability(odds)
+```
+
+Return a decimal probability in the range:
+
+```text
+0 < p < 1
+```
+
+Do not return percentages such as 60.
+
+Return:
+
+```text
+0.60
+```
+
+---
+
+# 10. Probability to American Odds
+
+Implement the inverse conversion.
+
+If:
+
+```text
+p >= 0.5
+```
+
+then:
+
+```text
+odds = -100 * p / (1 - p)
+```
+
+If:
+
+```text
+p < 0.5
+```
+
+then:
+
+```text
+odds = 100 * (1 - p) / p
+```
+
+Recommended function:
+
+```text
+probability_to_american(p)
+```
+
+Example:
+
+```text
+0.40 → +150
+```
+
+This output is primarily for display.
+
+All calculations should use probability directly.
+
+---
+
+# 11. Vig Removal
+
+Raw sportsbook implied probabilities contain bookmaker margin.
+
+Whenever both complementary sides of a market are available, remove the vig before treating the sportsbook price as a fair probability.
+
+Example:
+
+```text
+Over -110
+Under -110
+```
+
+Both imply:
+
+```text
+52.38%
+```
+
+Total:
+
+```text
+104.76%
+```
+
+Normalize them:
+
+```text
+fair_over =
+raw_over / (raw_over + raw_under)
+
+fair_under =
+raw_under / (raw_over + raw_under)
+```
+
+Result:
+
+```text
+Over = 50%
+Under = 50%
+```
+
+Suggested function:
+
+```text
+remove_vig(prob_a, prob_b)
+```
+
+or:
+
+```text
+remove_vig_from_two_way_market(...)
+```
+
+---
+
+# 12. Missing Opposite Side
+
+Some APIs may expose only one side, or matching the opposite side may fail.
+
+Do not pretend vig has been removed when it has not.
+
+The data model should indicate whether the probability came from:
+
+```text
+no_vig
+raw_implied
+estimated
+```
+
+For example:
+
+```json
+{
+  "probability": 0.43,
+  "probability_method": "no_vig"
+}
+```
+
+A raw implied sportsbook probability is weaker evidence than a properly de-vigged probability.
+
+This distinction should remain available for later filtering or analysis.
+
+---
+
+# 13. Sportsbook Consensus
+
+After computing a fair/no-vig probability for each sportsbook, combine books into a consensus fair probability.
+
+Initial implementation may use:
+
+```text
+mean
+```
+
+or:
+
+```text
+median
+```
+
+Median is useful because it is resistant to a single outlier sportsbook.
+
+Example sportsbook fair probabilities:
+
+```text
+Book A: 0.405
+Book B: 0.417
+Book C: 0.410
+Book D: 0.462
+```
+
+Median would prevent the 0.462 quote from disproportionately changing the result.
+
+Suggested function:
+
+```text
+calculate_consensus(probabilities)
+```
+
+Return:
+
+```text
+fair_probability
+number_of_books
+dispersion
+```
+
+Example:
+
+```json
+{
+  "fair_probability": 0.412,
+  "books_used": 4,
+  "min_probability": 0.405,
+  "max_probability": 0.462
+}
+```
+
+Keeping dispersion is valuable because sportsbook disagreement may indicate uncertainty or bad market matching.
+
+---
+
+# 14. Future Consensus Improvements
+
+Do not hard-code the system in a way that prevents more advanced weighting later.
+
+Possible future weights include:
+
+- sportsbook sharpness
+- market liquidity
+- sportsbook limits
+- quote age
+- historical predictive accuracy
+- whether both sides were available
+- line movement
+
+The first version does not need these.
+
+The architecture should simply allow them later.
+
+---
+
+# 15. Kalshi Data Ingestion
+
+The Kalshi client should retrieve enough information to identify and price sports contracts.
+
+Useful fields include:
+
+```text
+event ID
+market/ticker ID
+title
+subtitle
+rules
+close time
+event time
+status
+YES bid
+YES ask
+NO bid
+NO ask
+last price
+volume
+open interest
+```
+
+Not every field is necessarily required for the EV calculation, but preserving them can help debug market matching and liquidity issues.
+
+---
+
+# 16. Choosing the Kalshi Price
+
+Do not casually assume that:
+
+```text
+last traded price
+```
+
+equals:
+
+```text
+current executable price
+```
+
+For a real scanner, EV should ideally be calculated against the price at which a new position can actually be entered.
+
+For buying YES, that generally means the relevant executable YES ask or equivalent order-book price.
+
+For buying NO, use the corresponding executable NO-side price.
+
+The project should make the selected price type explicit.
+
+Example:
+
+```json
+{
+  "kalshi_price": 0.36,
+  "price_type": "yes_ask"
+}
+```
+
+If only a last-trade price is available, record that limitation.
+
+---
+
+# 17. Kalshi Price Representation
+
+Internally store Kalshi price as a decimal:
+
+```text
+36 cents → 0.36
+```
+
+not:
+
+```text
+36
+```
+
+This allows direct comparison with probability.
+
+Conceptually:
+
+```text
+Kalshi price ≈ market-implied probability
+```
+
+A YES contract priced at:
+
+```text
+0.36
+```
+
+costs:
+
+```text
+$0.36
+```
+
+per contract and settles to:
+
+```text
+$1
+```
+
+if YES occurs.
+
+---
+
+# 18. Kalshi Market Matching
+
+This is one of the highest-risk parts of the system.
+
+A sportsbook outcome and Kalshi contract must represent the same event.
+
+Compare:
+
+```text
+sport
+game
+player/team
+market/stat
+line
+direction
+event date
+settlement definition
+```
+
+Example sportsbook market:
+
+```text
+Dak Prescott Over 2.5 Passing Touchdowns
+```
+
+may match a Kalshi YES contract equivalent to:
+
+```text
+Dak Prescott records 3 or more passing touchdowns.
+```
+
+These are logically identical.
+
+But:
+
+```text
+Dak Prescott 2+ passing touchdowns
+```
+
+is not equivalent.
+
+That corresponds to:
+
+```text
+Over 1.5
+```
+
+not:
+
+```text
+Over 2.5
+```
+
+Always compare the semantic settlement rule.
+
+---
+
+# 19. Market Equivalence
+
+A successful match should mean that both contracts settle identically for every possible outcome.
+
+This is stronger than saying the text looks similar.
+
+For example:
+
+```text
+Over 49.5 receiving yards
+```
+
+is equivalent to:
+
+```text
+50+ receiving yards
+```
+
+But:
+
+```text
+Over 50.5
+```
+
+is not.
+
+Market matching should fail closed:
+
+```text
+uncertain match → do not calculate opportunity
+```
+
+rather than:
+
+```text
+uncertain match → assume equivalent
+```
+
+---
+
+# 20. Fair Probability Direction
+
+Before calculating EV, normalize everything into:
+
+```text
+Probability that the Kalshi contract being purchased resolves YES
+```
+
+Example:
+
+Sportsbook estimate:
+
+```text
+P(Player Over 49.5) = 0.42
+```
+
+Kalshi YES contract:
+
+```text
+Player gets 50+ yards
+```
+
+then:
+
+```text
+p = 0.42
+```
+
+If instead the Kalshi contract represents:
+
+```text
+Player gets fewer than 50 yards
+```
+
+then:
+
+```text
+p = 1 - 0.42
+```
+
+This lets all contracts use the same EV formula.
+
+---
+
+# 21. Kalshi EV Calculation
+
+For a YES contract:
+
+```text
+p = estimated fair probability
+k = Kalshi purchase price
+```
+
+The contract settles to:
+
+```text
+$1 if YES
+$0 if NO
+```
+
+Expected payout:
+
+```text
+p × $1
+```
+
+Therefore:
+
+```text
+expected_value_dollars_per_contract = p - k
+```
+
+Example:
+
+```text
+p = 0.43
+k = 0.40
+```
+
+Then:
+
+```text
+expected profit = 0.43 - 0.40
+                = $0.03 per contract
+```
+
+---
+
+# 22. EV Percentage
+
+To express EV relative to the money spent:
+
+```text
+EV% = (p - k) / k
+```
+
+Example:
+
+```text
+p = 0.43
+k = 0.40
+```
+
+Then:
+
+```text
+EV% = (0.43 - 0.40) / 0.40
+    = 0.075
+    = 7.5%
+```
+
+Suggested function:
+
+```text
+calculate_ev(fair_probability, kalshi_price)
+```
+
+Recommended return:
+
+```json
+{
+  "expected_profit_per_contract": 0.03,
+  "ev_decimal": 0.075,
+  "ev_percent": 7.5
+}
+```
+
+---
+
+# 23. Important EV Interpretation
+
+Do not confuse:
+
+```text
+probability difference
+```
+
+with:
+
+```text
+ROI EV
+```
+
+Example:
+
+```text
+Fair probability = 43%
+Kalshi = 40%
+```
+
+The probability edge is:
+
+```text
+3 percentage points
+```
+
+But the EV is:
+
+```text
+7.5%
+```
+
+because the expected $0.03 profit is being measured against a $0.40 purchase price.
+
+---
+
+# 24. Fair Odds
+
+Fair American odds should be derived from the final consensus fair probability.
+
+Example:
+
+```text
+fair_probability = 0.43
+```
+
+produces approximately:
+
+```text
++133
+```
+
+The final output should ideally contain both:
+
+```text
+fair_probability
+fair_american_odds
+```
+
+Probability is used internally.
+
+American odds are provided for readability.
+
+---
+
+# 25. Example Full Calculation
+
+Suppose sportsbook data produces these de-vigged probabilities:
+
+```text
+Book A: 0.418
+Book B: 0.429
+Book C: 0.421
+Book D: 0.432
+```
+
+Consensus:
+
+```text
+0.425
+```
+
+Fair probability:
+
+```text
+42.5%
+```
+
+Equivalent Kalshi YES ask:
+
+```text
+$0.39
+```
+
+Expected profit:
+
+```text
+0.425 - 0.39
+= $0.035
+```
+
+EV:
+
+```text
+0.035 / 0.39
+≈ 0.08974
+≈ 8.97%
+```
+
+Fair American odds:
+
+```text
+100 × (1 - 0.425) / 0.425
+≈ +135
+```
+
+Output:
+
+```text
+Market: Player X Over 49.5 Receiving Yards
+
+Kalshi Price: $0.39
+Fair Probability: 42.5%
+Fair Odds: +135
+Expected Profit/Contract: $0.035
+EV: +9.0%
+```
+
+---
+
+# 26. Data Freshness
+
+Odds move quickly.
+
+Every data object should include timestamps.
+
+At minimum:
+
+```text
+sportsbook_updated_at
+sportsbook_fetched_at
+kalshi_updated_at
+kalshi_fetched_at
+calculated_at
+```
+
+Avoid comparing a fresh Kalshi quote with a sportsbook quote that is significantly older without flagging it.
+
+Suggested derived value:
+
+```text
+quote_age_seconds
+```
+
+---
+
+# 27. Stale Data Handling
+
+Eventually define a freshness threshold.
+
+Example concept:
+
+```text
+if sportsbook quote > N minutes old:
+    mark stale
+
+if Kalshi quote > N minutes old:
+    mark stale
+```
+
+Do not silently present stale data as current.
+
+Potential statuses:
+
+```text
+fresh
+stale
+unknown
+```
+
+---
+
+# 28. Pregame Only
+
+The intended scanner primarily evaluates markets before games begin.
+
+The system should preserve:
+
+```text
+scheduled_start_time
+game_status
+```
+
+Possible statuses:
+
+```text
+scheduled
+live
+final
+postponed
+cancelled
+```
+
+Markets from already-started events should not accidentally enter the normal pregame calculation path.
+
+---
+
+# 29. Raw Data Preservation
+
+Preserve three conceptual layers.
+
+## Raw
+
+Exactly what providers returned.
+
+Examples:
+
+```text
+raw sportsbook API response
+raw Kalshi market response
+```
+
+## Normalized
+
+Canonical representation:
+
+```text
+normalized team
+normalized player
+normalized market
+normalized line
+normalized side
+```
+
+## Derived
+
+Calculated values:
+
+```text
+implied probability
+no-vig probability
+consensus probability
+fair odds
+Kalshi execution price
+EV
+```
+
+Never overwrite raw values with derived ones.
+
+---
+
+# 30. Suggested Core Models
+
+Conceptually:
+
+```text
+SportsbookQuote
+KalshiMarket
+NormalizedMarket
+FairProbabilityEstimate
+EVOpportunity
+```
+
+Example:
+
+```json
+{
+  "sport": "NFL",
+  "event": {
+    "away": "Tampa Bay Buccaneers",
+    "home": "Dallas Cowboys",
+    "start_time": "..."
+  },
+
+  "player": "Dak Prescott",
+  "market": "passing_touchdowns",
+  "line": 2.5,
+  "side": "over",
+
+  "sportsbook_quotes": [
+    {
+      "book": "BookA",
+      "american_odds": 150,
+      "implied_probability": 0.40,
+      "no_vig_probability": 0.394
+    },
+    {
+      "book": "BookB",
+      "american_odds": 145,
+      "implied_probability": 0.408,
+      "no_vig_probability": 0.401
+    }
+  ],
+
+  "fair_probability": 0.397,
+  "fair_odds": 152,
+
+  "kalshi_market_id": "...",
+  "kalshi_price": 0.36,
+  "kalshi_price_type": "yes_ask",
+
+  "expected_profit_per_contract": 0.037,
+  "ev_percent": 10.28,
+
+  "calculated_at": "..."
+}
+```
+
+---
+
+# 31. Error Handling
+
+The scanner should skip an opportunity rather than produce an unreliable calculation when critical information is missing.
+
+Examples:
+
+```text
+No reliable game match
+No reliable player match
+Different prop lines
+Ambiguous contract settlement
+Missing price
+Invalid odds
+Game already started
+Clearly stale quote
+```
+
+Log why the opportunity was skipped.
+
+Example:
+
+```text
+SKIP Dak Prescott passing_touchdowns:
+Sportsbook line 2.5 does not match Kalshi threshold 1.5.
+```
+
+---
+
+# 32. Logging
+
+Logging is important because market matching and external APIs are the most likely failure points.
+
+Useful logs include:
+
+```text
+games fetched
+sportsbook markets fetched
+Kalshi markets fetched
+markets normalized
+candidate matches
+successful matches
+rejected matches
+fair probabilities calculated
+EV opportunities calculated
+API errors
+stale quotes
+```
+
+A debugging mode should ideally show the component probabilities used in a calculation.
+
+---
+
+# 33. Validation Checks
+
+Before accepting a calculated opportunity, validate:
+
+```text
+0 < fair_probability < 1
+0 < kalshi_price < 1
+```
+
+Both values must refer to the same direction/outcome.
+
+Also verify:
+
+```text
+line matches
+event matches
+player/team matches
+market matches
+game has not started
+```
+
+Do not allow NaN, infinity, missing odds, or invalid probabilities into downstream calculations.
+
+---
+
+# 34. Useful Sanity Checks
+
+Example:
+
+If:
+
+```text
+fair_probability = 0.50
+kalshi_price = 0.50
+```
+
+then:
+
+```text
+EV = 0%
+```
+
+If:
+
+```text
+fair_probability = 0.60
+kalshi_price = 0.50
+```
+
+then:
+
+```text
+EV = 20%
+```
+
+Calculation:
+
+```text
+(0.60 - 0.50) / 0.50 = 0.20
+```
+
+If:
+
+```text
+fair_probability < kalshi_price
+```
+
+EV should be negative.
+
+These should be unit-tested.
+
+---
+
+# 35. Unit Tests Codex Should Maintain
+
+At minimum, test:
+
+## American odds conversion
+
+```text
++100 → 0.50
+-100 → 0.50
++200 → 0.333333...
+-200 → 0.666666...
+```
+
+## Probability conversion
+
+```text
+0.50 → +100 / -100 convention
+0.40 → +150
+0.60 → -150
+```
+
+## Vig removal
+
+```text
+-110 / -110
+→ 50% / 50%
+```
+
+## EV
+
+```text
+fair = 0.43
+Kalshi = 0.40
+→ EV = 7.5%
+```
+
+## Zero edge
+
+```text
+fair = 0.40
+Kalshi = 0.40
+→ EV = 0%
+```
+
+## Negative edge
+
+```text
+fair = 0.35
+Kalshi = 0.40
+→ EV < 0
+```
+
+## Complement probability
+
+```text
+P(over) = 0.43
+P(under) = 0.57
+```
+
+---
+
+# 36. Integration Tests
+
+Useful integration scenarios:
+
+```text
+Fetch sportsbook game
+→ normalize player prop
+→ pair Over and Under
+→ remove vig
+→ compute fair probability
+→ find equivalent Kalshi contract
+→ obtain executable price
+→ calculate EV
+```
+
+Test mismatches too:
+
+```text
+sportsbook O49.5
+Kalshi 55+
+→ must reject
+```
+
+and:
+
+```text
+same player
+different game/date
+→ must reject
+```
+
+---
+
+# 37. Avoid These Mistakes
+
+Codex should specifically avoid:
+
+```text
+Using raw sportsbook implied probability as fair probability when vig can be removed.
+
+Averaging American odds directly.
+
+Comparing different prop lines.
+
+Matching markets only by player name.
+
+Treating Kalshi's last trade as guaranteed executable price.
+
+Confusing cents with decimal probability.
+
+Using 40 instead of 0.40 internally.
+
+Comparing YES probability to a NO contract without complementing it.
+
+Using stale sportsbook odds against a new Kalshi quote.
+
+Calculating pregame EV after the game has begun.
+
+Discarding raw source data after normalization.
+
+Silently guessing when a market match is ambiguous.
+```
+
+---
+
+# 38. API Secrets
+
+API keys and credentials must not be committed to source control.
+
+Use environment variables.
+
+Example:
+
+```text
+.env
+```
+
+and ensure:
+
+```text
+.env
+```
+
+is included in:
+
+```text
+.gitignore
+```
+
+Example concept:
+
+```text
+SPORTS_ODDS_API_KEY=...
+KALSHI_API_KEY=...
+KALSHI_PRIVATE_KEY_PATH=...
+```
+
+Do not hard-code credentials in Python files, configuration committed to Git, logs, or README examples.
+
+---
+
+# 39. Configuration
+
+Values likely to belong in configuration rather than source code include:
+
+```text
+enabled leagues
+sportsbook providers
+API endpoints
+quote freshness limits
+consensus method
+Kalshi environment
+logging level
+database/storage location
+```
+
+Example:
+
+```json
+{
+  "consensus_method": "median",
+  "pregame_only": true,
+  "enabled_sports": [
+    "NFL",
+    "NHL",
+    "MLB"
+  ]
+}
+```
+
+Filtering thresholds are intentionally outside the scope of this handoff.
+
+---
+
+# 40. Data Storage
+
+Even if the current program only prints opportunities, strongly consider storing snapshots.
+
+A useful history record contains:
+
+```text
+timestamp
+market identity
+sportsbook quotes
+consensus probability
+Kalshi price
+fair odds
+EV
+```
+
+Historical data would allow later analysis of:
+
+```text
+closing-line value
+price movement
+model calibration
+sport performance
+market-type performance
+EV bucket performance
+```
+
+This will become increasingly important as the project is tested over hundreds or thousands of bets.
+
+---
+
+# 41. Suggested Calculation Interface
+
+A clean final calculation layer might conceptually expose:
+
+```text
+calculate_market_value(
+    sportsbook_quotes,
+    kalshi_contract
+)
+```
+
+and return:
+
+```json
+{
+  "fair_probability": 0.425,
+  "fair_odds": 135,
+  "kalshi_price": 0.39,
+  "expected_profit_per_contract": 0.035,
+  "ev_percent": 8.97
+}
+```
+
+The calculation layer should not need to know how the API requests were made.
+
+---
+
+# 42. Recommended Development Priority
+
+When Codex continues this project, prioritize correctness in this order:
+
+```text
+1. Correct event matching
+
+2. Correct player/team normalization
+
+3. Correct market and line matching
+
+4. Correct sportsbook odds conversion
+
+5. Correct vig removal
+
+6. Correct sportsbook consensus
+
+7. Correct Kalshi contract matching
+
+8. Correct executable Kalshi price
+
+9. Correct EV calculation
+
+10. Performance / optimization
+```
+
+A fast scanner producing incorrect market matches is worse than a slower scanner producing trustworthy calculations.
+
+---
+
+# 43. Main Invariant
+
+The core invariant for every opportunity is:
+
+```text
+The sportsbook-derived fair probability
+and
+the Kalshi price
+
+MUST describe exactly the same binary outcome.
+```
+
+If that condition is not confidently true, do not calculate EV.
+
+---
+
+# 44. Definition of Success
+
+The calculation side of this project is successful when it can automatically take raw sportsbook and Kalshi data and reliably produce:
+
+```text
+Sport
+Game
+Player/team
+Market
+Line
+Side
+Sportsbooks used
+Fair probability
+Fair American odds
+Kalshi executable price
+Expected profit per contract
+EV percentage
+Data timestamps
+```
+
+with enough source information preserved that any suspicious result can be traced back to the original odds and market data.
+
+The system should make it possible to answer:
+
+```text
+Why does the program think this contract has +7.4% EV?
+```
+
+and reconstruct the answer from the underlying sportsbook quotes, vig removal, consensus calculation, Kalshi price, and EV formula.
+
+That traceability is more important than producing a large number of opportunities.
